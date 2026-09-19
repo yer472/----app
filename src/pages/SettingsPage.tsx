@@ -1,0 +1,557 @@
+import { useEffect, useState } from 'react'
+import { Button } from '@/components/ui/Button'
+import { Modal } from '@/components/ui/Modal'
+import { getStorageUsage } from '@/db'
+import { revokeAllAssetUrls } from '@/lib/asset'
+import {
+  describeArchive,
+  parseArchive,
+  type ParsedArchive,
+} from '@/lib/backup/archive'
+import {
+  archiveFileName,
+  type BackupCounts,
+} from '@/lib/backup/format'
+import { describeBackupResult, buildExportArchive } from '@/lib/backup/service'
+import { downloadBlob, pickFile } from '@/lib/download'
+import { formatBytes } from '@/lib/format'
+import { formatDateTime } from '@/lib/time'
+import { cn } from '@/lib/cn'
+import { BackupRepository, type IntegrityReport } from '@/repository'
+import { useBackupStore } from '@/store/backupStore'
+
+type Busy =
+  | { kind: 'none' }
+  | { kind: 'export'; done: number; total: number }
+  | { kind: 'import' }
+
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description?: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
+      <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+        {title}
+      </h2>
+      {description ? (
+        <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+          {description}
+        </p>
+      ) : null}
+      <div className="mt-4">{children}</div>
+    </section>
+  )
+}
+
+function Notice({
+  tone,
+  children,
+}: {
+  tone: 'info' | 'warn' | 'error' | 'ok'
+  children: React.ReactNode
+}) {
+  const tones = {
+    info: 'border-neutral-200 bg-neutral-50 text-neutral-600 dark:border-neutral-800 dark:bg-neutral-800/40 dark:text-neutral-300',
+    ok: 'border-green-300 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300',
+    warn: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200',
+    error:
+      'border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300',
+  } as const
+
+  return (
+    <div className={cn('rounded-md border px-3 py-2 text-sm', tones[tone])}>
+      {children}
+    </div>
+  )
+}
+
+export function SettingsPage() {
+  const [busy, setBusy] = useState<Busy>({ kind: 'none' })
+  const [notice, setNotice] = useState<{
+    tone: 'info' | 'ok' | 'warn' | 'error'
+    text: string
+  } | null>(null)
+
+  const [persisted, setPersisted] = useState<boolean | null>(null)
+  const [usage, setUsage] = useState<{ usage: number; quota: number } | null>(
+    null,
+  )
+  const [currentCounts, setCurrentCounts] = useState<BackupCounts | null>(null)
+
+  const [pending, setPending] = useState<ParsedArchive | null>(null)
+  const [integrity, setIntegrity] = useState<IntegrityReport | null>(null)
+  const [exportFirst, setExportFirst] = useState(true)
+
+  const backup = useBackupStore()
+
+  const refreshCounts = () => {
+    void BackupRepository.counts().then(setCurrentCounts)
+  }
+
+  useEffect(() => {
+    void backup.hydrate()
+    void getStorageUsage().then(setUsage)
+    void navigator.storage
+      ?.persisted?.()
+      .then(setPersisted)
+      .catch(() => setPersisted(null))
+    void BackupRepository.counts().then(setCurrentCounts)
+    // 只在进入页面时跑一次。backup.hydrate 内部是幂等的
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleExport = async () => {
+    setNotice(null)
+    setBusy({ kind: 'export', done: 0, total: 0 })
+    try {
+      const { blob, counts } = await buildExportArchive((progress) =>
+        setBusy({ kind: 'export', done: progress.done, total: progress.total }),
+      )
+      downloadBlob(blob, archiveFileName())
+      setNotice({
+        tone: 'ok',
+        text: `已导出 ${counts.subjects} 个科目、${counts.chapters} 个章节、${counts.notes} 篇笔记、${counts.attachments} 张图片，共 ${formatBytes(blob.size)}。浏览器应该已经开始下载了，检查一下下载文件夹。`,
+      })
+    } catch (error) {
+      setNotice({
+        tone: 'error',
+        text: `导出失败：${error instanceof Error ? error.message : String(error)}`,
+      })
+    } finally {
+      setBusy({ kind: 'none' })
+    }
+  }
+
+  const handlePickImportFile = async () => {
+    setNotice(null)
+    const file = await pickFile('.zip,.json,application/zip,application/json')
+    if (!file) return
+
+    setBusy({ kind: 'import' })
+    try {
+      const parsed = await parseArchive(file, file.name)
+      const report = await BackupRepository.inspect(parsed.backup)
+      setPending(parsed)
+      setIntegrity(report)
+      setExportFirst(true)
+    } catch (error) {
+      setNotice({
+        tone: 'error',
+        text: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      setBusy({ kind: 'none' })
+    }
+  }
+
+  const handleConfirmImport = async () => {
+    if (!pending) return
+    setBusy({ kind: 'import' })
+    setNotice(null)
+
+    try {
+      // 先把现有数据导出一份再覆盖。恢复本身是破坏性操作，
+      // 万一用户选错了文件，这一步就是后悔药。
+      if (exportFirst && currentCounts && currentCounts.notes > 0) {
+        const { blob } = await buildExportArchive()
+        downloadBlob(blob, `XXBJ-恢复前备份-${archiveFileName().replace('XXBJ-备份-', '')}`)
+      }
+
+      await BackupRepository.replaceAll(pending.backup, pending.attachments)
+
+      // 旧图片的 blob URL 现在指向已经删掉的数据，全部释放掉
+      revokeAllAssetUrls()
+      refreshCounts()
+
+      const parts = [
+        `已恢复 ${pending.backup.subjects.length} 个科目、${pending.backup.chapters.length} 个章节、${pending.backup.notes.length} 篇笔记`,
+        `${pending.attachments.length} 张图片`,
+      ]
+      if (pending.missingImages.length > 0) {
+        parts.push(`有 ${pending.missingImages.length} 张图片在备份里没找到，未能恢复`)
+      }
+      setNotice({ tone: 'ok', text: `${parts.join('，')}。` })
+      setPending(null)
+    } catch (error) {
+      setNotice({
+        tone: 'error',
+        text: `恢复失败：${error instanceof Error ? error.message : String(error)}`,
+      })
+    } finally {
+      setBusy({ kind: 'none' })
+    }
+  }
+
+  const backupDisabledReason = !backup.supported
+    ? '当前浏览器不支持 File System Access API。请用 Edge 或 Chrome 打开，或者改用上面的手动导出。'
+    : null
+
+  const orphanTotal = integrity
+    ? integrity.orphanChapters + integrity.orphanNotes + integrity.orphanAttachments
+    : 0
+
+  return (
+    <div className="mx-auto max-w-3xl px-8 py-10">
+      <h1 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+        设置
+      </h1>
+      <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+        笔记数据全部存在这台电脑的浏览器里，不经过任何服务器。
+        也正因为如此，<strong className="font-medium">清理浏览器数据会把笔记一起清掉</strong>
+        ——下面的导出和自动备份就是为此准备的。
+      </p>
+
+      {notice ? (
+        <div className="mt-5">
+          <Notice tone={notice.tone}>{notice.text}</Notice>
+        </div>
+      ) : null}
+
+      <div className="mt-6 space-y-5">
+        {/* ---------- 存储状态 ---------- */}
+        <Section title="存储状态">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
+            <div>
+              <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                笔记
+              </dt>
+              <dd className="mt-0.5 tabular-nums">
+                {currentCounts ? `${currentCounts.notes} 篇` : '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                科目 / 章节
+              </dt>
+              <dd className="mt-0.5 tabular-nums">
+                {currentCounts
+                  ? `${currentCounts.subjects} / ${currentCounts.chapters}`
+                  : '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                图片
+              </dt>
+              <dd className="mt-0.5 tabular-nums">
+                {currentCounts
+                  ? `${currentCounts.attachments} 张 · ${formatBytes(currentCounts.imageBytes)}`
+                  : '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                浏览器占用
+              </dt>
+              <dd className="mt-0.5 tabular-nums">
+                {usage ? formatBytes(usage.usage) : '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                持久化存储
+              </dt>
+              <dd className="mt-0.5">
+                {persisted === null
+                  ? '—'
+                  : persisted
+                    ? '已启用'
+                    : '未启用'}
+              </dd>
+            </div>
+          </dl>
+
+          {persisted === false ? (
+            <div className="mt-3">
+              <Notice tone="warn">
+                浏览器没有授予持久化存储权限。它可能在磁盘紧张时自动清理本站数据。
+                这不影响下面的导出和备份功能，但说明「靠浏览器自己保底」是不可靠的。
+              </Notice>
+            </div>
+          ) : null}
+        </Section>
+
+        {/* ---------- 导出 ---------- */}
+        <Section
+          title="导出全部数据"
+          description="打包成一个 zip，里面是 data.json、每篇笔记的 .md 文件，以及全部图片原图。换电脑、重装浏览器、或者只是想把笔记存到别处，都用它。"
+        >
+          <Button
+            variant="primary"
+            onClick={() => void handleExport()}
+            disabled={busy.kind !== 'none'}
+          >
+            {busy.kind === 'export'
+              ? busy.total > 0
+                ? `正在打包 ${busy.done}/${busy.total}…`
+                : '正在读取数据…'
+              : '导出为 zip 文件'}
+          </Button>
+
+          <div className="mt-3">
+            <Notice tone="info">
+              导出的 .md 文件用记事本、VS Code、Obsidian 都能直接打开。
+              即使以后不用这个 App 了，笔记本身还是普通的 Markdown 文件。
+            </Notice>
+          </div>
+        </Section>
+
+        {/* ---------- 恢复 ---------- */}
+        <Section
+          title="从备份恢复"
+          description="选择一份导出时生成的 zip，或者备份文件夹里的 data.json。"
+        >
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            恢复是<strong className="font-medium">覆盖式</strong>的：
+            现有的全部科目、章节、笔记和图片都会被删除，换成备份里的内容。
+          </div>
+
+          <div className="mt-3">
+            <Button
+              onClick={() => void handlePickImportFile()}
+              disabled={busy.kind !== 'none'}
+            >
+              {busy.kind === 'import' ? '正在读取备份…' : '选择备份文件…'}
+            </Button>
+          </div>
+        </Section>
+
+        {/* ---------- 自动备份 ---------- */}
+        <Section
+          title="自动备份到本地文件夹"
+          description="指定一个文件夹，App 会把数据写进去：一份「当前状态」的普通文件，外加每天一份 zip 快照（保留 7 天）。指向 OneDrive 同步目录就等于白捡了一个云备份。"
+        >
+          {backupDisabledReason ? (
+            <Notice tone="warn">{backupDisabledReason}</Notice>
+          ) : !backup.ready ? (
+            <div className="text-sm text-neutral-400">正在读取设置…</div>
+          ) : !backup.directoryName ? (
+            <div>
+              <Button
+                variant="primary"
+                onClick={() => void backup.chooseDirectory()}
+                disabled={backup.running}
+              >
+                选择备份文件夹…
+              </Button>
+              <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+                建议选一个同步盘的目录（OneDrive、坚果云等），这样即使这台电脑坏了，备份也还在。
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-neutral-500 dark:text-neutral-400">
+                    文件夹
+                  </span>
+                  <code className="rounded bg-neutral-100 px-2 py-0.5 text-xs dark:bg-neutral-800">
+                    {backup.directoryName}
+                  </code>
+                </div>
+                <span
+                  className={cn(
+                    'rounded-full px-2 py-0.5 text-xs',
+                    backup.permission === 'granted'
+                      ? 'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300'
+                      : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
+                  )}
+                >
+                  {backup.permission === 'granted' ? '已授权' : '需要重新授权'}
+                </span>
+              </div>
+
+              {backup.permission !== 'granted' ? (
+                <Notice tone="warn">
+                  浏览器授权是按会话算的，重新打开 App 之后需要再点一次。
+                  <div className="mt-2">
+                    <Button
+                      size="sm"
+                      onClick={() => void backup.grantPermission()}
+                      disabled={backup.running}
+                    >
+                      重新授权并立即备份
+                    </Button>
+                  </div>
+                </Notice>
+              ) : null}
+
+              <label className="flex items-start gap-2.5 text-sm">
+                <input
+                  type="checkbox"
+                  checked={backup.autoEnabled}
+                  onChange={(event) =>
+                    void backup.setAutoEnabled(event.target.checked)
+                  }
+                  className="mt-0.5 size-4 rounded border-neutral-300 dark:border-neutral-600"
+                />
+                <span>
+                  自动备份
+                  <span className="block text-xs text-neutral-500 dark:text-neutral-400">
+                    停止编辑 30 秒后自动备份一次。没改动过的内容不会重复写入，
+                    所以不用担心它一直读写硬盘。
+                  </span>
+                </span>
+              </label>
+
+              {backup.progress ? (
+                <div className="text-sm text-neutral-500 dark:text-neutral-400">
+                  {backup.progress.message}
+                  {backup.progress.total ? (
+                    <span className="ml-2 tabular-nums">
+                      {backup.progress.done}/{backup.progress.total}
+                    </span>
+                  ) : null}
+                </div>
+              ) : backup.lastResult ? (
+                <div className="text-sm text-neutral-500 dark:text-neutral-400">
+                  上次备份：{describeBackupResult(backup.lastResult)}
+                </div>
+              ) : (
+                <div className="text-sm text-neutral-500 dark:text-neutral-400">
+                  还没有备份过。
+                </div>
+              )}
+
+              {backup.error ? <Notice tone="error">{backup.error}</Notice> : null}
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={() => void backup.backupNow(true)}
+                  disabled={backup.running || backup.permission !== 'granted'}
+                >
+                  {backup.running ? '正在备份…' : '立即备份'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `不再自动备份到「${backup.directoryName}」？\n\n文件夹里的备份文件不会被删除，只是 App 不再往里写了。`,
+                      )
+                    ) {
+                      void backup.forgetDirectory()
+                    }
+                  }}
+                  disabled={backup.running}
+                >
+                  取消使用此文件夹
+                </Button>
+              </div>
+            </div>
+          )}
+        </Section>
+
+        <Section title="手动备份的注意事项">
+          <ul className="list-disc space-y-1.5 pl-5 text-sm text-neutral-600 dark:text-neutral-400">
+            <li>
+              数据只在这台电脑的浏览器里。换浏览器、换电脑、清理浏览器数据，
+              笔记都会看不到——这是纯本地方案的代价，所以备份不能省。
+            </li>
+            <li>
+              备份文件夹里，<code className="text-xs">笔记/</code> 和{' '}
+              <code className="text-xs">images/</code> 是<strong className="font-medium">只增不删</strong>
+              的。在 App 里删掉一篇笔记，文件夹里的 .md 不会被清理，残留文件不影响恢复。
+            </li>
+            <li>
+              自动备份只在 App 开着的时候跑。写完笔记关掉浏览器之前，
+              可以到这一页点一下「立即备份」，或者打开「自动备份」让它自己处理。
+            </li>
+          </ul>
+        </Section>
+      </div>
+
+      {/* ---------- 恢复确认 ---------- */}
+      <Modal
+        open={pending !== null}
+        title="确认从备份恢复"
+        onClose={() => setPending(null)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setPending(null)}>
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => void handleConfirmImport()}
+              disabled={busy.kind !== 'none'}
+            >
+              {busy.kind === 'import' ? '正在恢复…' : '确认恢复'}
+            </Button>
+          </>
+        }
+      >
+        {pending ? (
+          <div className="space-y-3 text-sm text-neutral-600 dark:text-neutral-400">
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                这份备份包含
+              </div>
+              <div className="mt-0.5 text-neutral-900 dark:text-neutral-100">
+                {describeArchive(pending.backup)}
+              </div>
+            </div>
+
+            {pending.hasNoImages ? (
+              <Notice tone="warn">
+                这份备份里没有图片数据（读的是 data.json，而不是 zip 包），
+                恢复之后笔记里的图片会显示不出来。想连图片一起恢复，请选
+                <code className="mx-1">快照/</code>
+                目录里的 zip。
+              </Notice>
+            ) : pending.missingImages.length > 0 ? (
+              <Notice tone="warn">
+                有 {pending.missingImages.length} 张图片在备份包里找不到，
+                这些图恢复后显示不出来。其余内容不受影响。
+              </Notice>
+            ) : null}
+
+            {orphanTotal > 0 && integrity ? (
+              <Notice tone="warn">
+                这份备份的引用关系不完整：{integrity.orphanChapters} 个章节找不到所属科目、
+                {integrity.orphanNotes} 篇笔记找不到所属章节、
+                {integrity.orphanAttachments} 张图片找不到所属笔记。
+                数据仍会照原样恢复，但这些内容可能在界面上看不到。
+              </Notice>
+            ) : null}
+
+            <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+              现在的 {currentCounts?.subjects ?? 0} 个科目、
+              {currentCounts?.chapters ?? 0} 个章节、
+              {currentCounts?.notes ?? 0} 篇笔记、
+              {currentCounts?.attachments ?? 0} 张图片会被
+              <strong className="font-medium">永久删除</strong>，无法撤销。
+            </div>
+
+            <label className="flex items-start gap-2.5">
+              <input
+                type="checkbox"
+                checked={exportFirst}
+                onChange={(event) => setExportFirst(event.target.checked)}
+                className="mt-0.5 size-4 rounded border-neutral-300 dark:border-neutral-600"
+              />
+              <span>
+                恢复前先下载一份现有数据
+                <span className="block text-xs text-neutral-500 dark:text-neutral-400">
+                  推荐勾选。选错了备份文件的话，这就是唯一的退路。
+                </span>
+              </span>
+            </label>
+          </div>
+        ) : null}
+      </Modal>
+
+      {backup.lastResult ? (
+        <p className="mt-8 text-xs text-neutral-400">
+          最近一次备份：{formatDateTime(backup.lastResult.at)}
+        </p>
+      ) : null}
+    </div>
+  )
+}

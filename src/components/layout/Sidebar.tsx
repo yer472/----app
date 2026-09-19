@@ -35,6 +35,24 @@ export function Sidebar() {
         </NavLink>
       </div>
 
+      {/*
+        搜索入口做成「看起来像输入框的按钮」，而不是真的输入框。
+        真的输入框会和搜索页里的那个输入框争状态，两个框同步起来很容易出 bug；
+        而这个按钮点一下就跳到搜索页并自动聚焦，键盘流用 Ctrl+K。
+      */}
+      <div className="px-2 pb-2">
+        <NavLink
+          to="/search"
+          className="flex w-full items-center gap-2.5 rounded-md border border-neutral-200 bg-white px-2.5 py-1.5 text-sm text-neutral-500 transition-colors hover:border-neutral-300 hover:text-neutral-700 dark:border-neutral-700 dark:bg-neutral-800/60 dark:text-neutral-400 dark:hover:border-neutral-600 dark:hover:text-neutral-200"
+        >
+          <span aria-hidden>⌕</span>
+          <span className="flex-1 text-left">搜索笔记</span>
+          <kbd className="shrink-0 rounded border border-neutral-200 px-1 text-[10px] whitespace-nowrap text-neutral-400 dark:border-neutral-600">
+            Ctrl K
+          </kbd>
+        </NavLink>
+      </div>
+
       <nav className="flex-1 overflow-y-auto px-2 pb-4">
         <div className="px-2.5 py-1.5 text-xs font-medium tracking-wide text-neutral-400 uppercase dark:text-neutral-500">
           科目
@@ -73,6 +91,10 @@ export function Sidebar() {
           <span aria-hidden>◐</span>
           <span>主题：{themeLabel}</span>
         </button>
+        <NavLink to="/settings" className={navLinkClass}>
+          <span aria-hidden>⚙</span>
+          <span>设置与备份</span>
+        </NavLink>
         <NavLink to="/dev/db-check" className={navLinkClass}>
           <span aria-hidden>◎</span>
           <span>数据库自检</span>

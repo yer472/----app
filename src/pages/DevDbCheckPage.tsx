@@ -6,6 +6,7 @@ import {
   AttachmentRepository,
   ChapterRepository,
   NoteRepository,
+  SearchRepository,
   SubjectRepository,
 } from '@/repository'
 
@@ -137,12 +138,12 @@ export function DevDbCheckPage() {
 
       await check('6. 搜索：能命中正文关键词', async () => {
         assert(noteId, '前置步骤失败，跳过')
-        const hits = await NoteRepository.search('拉格朗日')
+        const hits = await SearchRepository.search('拉格朗日')
         assert(
           hits.some((h) => h.note.id === noteId),
           '搜索没有命中刚写入的笔记',
         )
-        return `关键词「拉格朗日」命中 ${hits.length} 条`
+        return `关键词「拉格朗日」命中 ${hits.length} 条，片段：${hits[0]?.snippet.slice(0, 30) ?? ''}`
       })
 
       await check('7. 附件：图片二进制能原样读回', async () => {

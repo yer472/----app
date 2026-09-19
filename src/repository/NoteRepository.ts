@@ -10,12 +10,6 @@ export interface CreateNoteInput {
   content?: string
 }
 
-export interface NoteSearchHit {
-  note: Note
-  /** 命中的字段，用于搜索结果里展示"为什么它被匹配到" */
-  matchedIn: 'title' | 'content'
-}
-
 export const NoteRepository = {
   /** 章节下的笔记，置顶的在前，其余按更新时间倒序 */
   async listByChapter(chapterId: ID): Promise<Note[]> {
@@ -93,33 +87,6 @@ export const NoteRepository = {
       await db.attachments.where('noteId').equals(id).delete()
       await db.notes.delete(id)
     })
-  },
-
-  /**
-   * 全局搜索（F4.1）。
-   *
-   * 目前是内存里的全表扫描。笔记规模在几百篇时完全够用；
-   * 等到接近产品文档里说的「1000 篇 / 1 秒」这个量级，
-   * 需要改成给正文建一份归一化的小写文本字段并加索引。
-   * 现在不提前优化，是因为真正的瓶颈要等有真实数据才知道在哪。
-   */
-  async search(keyword: string, limit = 50): Promise<NoteSearchHit[]> {
-    const needle = keyword.trim().toLowerCase()
-    if (!needle) return []
-
-    const all = await db.notes.toArray()
-    const hits: NoteSearchHit[] = []
-
-    for (const note of all) {
-      if (note.title.toLowerCase().includes(needle)) {
-        hits.push({ note, matchedIn: 'title' })
-      } else if (note.content.toLowerCase().includes(needle)) {
-        hits.push({ note, matchedIn: 'content' })
-      }
-      if (hits.length >= limit) break
-    }
-
-    return hits.sort((a, b) => b.note.updatedAt.localeCompare(a.note.updatedAt))
   },
 
   async totalCount(): Promise<number> {

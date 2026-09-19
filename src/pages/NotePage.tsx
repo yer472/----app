@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { revokeAllAssetUrls } from '@/lib/asset'
 import { cn } from '@/lib/cn'
+import { scheduleAutoBackup } from '@/store/backupStore'
 import {
   AttachmentRepository,
   ChapterRepository,
@@ -101,6 +102,11 @@ export function NotePage() {
       if (contentChanged && pendingContent !== null) {
         await AttachmentRepository.removeOrphansOfNote(noteId, pendingContent)
       }
+
+      // 真正落盘成功之后才排一次自动备份。
+      // 放在这里而不是监听数据库变化，是因为自动保存本身就很频繁，
+      // 由写入方主动通知可以顺带做防抖（见 backupStore 里的 30 秒延迟）。
+      scheduleAutoBackup()
     } catch {
       // 落盘失败时保留 pending，下次输入还会再试一次
       setStatus('unsaved')
