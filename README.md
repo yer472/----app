@@ -9,15 +9,34 @@
 ```bash
 npm install
 npm run dev      # 开发服务器，浏览器打开提示的地址
-npm run build    # 类型检查 + 打包到 dist/
+npm run build    # 类型检查 + 打包到 dist/（同时生成 dist/sw.js）
+npm run serve    # 起本地服务器，http://127.0.0.1:24816/
 npm run lint     # oxlint
+npm run icons    # 从 public/icon.svg 重新生成图标（改了图标才需要跑）
+npm run verify:pwa   # 端到端验证离线能力（需要先 build）
 ```
 
 **浏览器要求：Chrome 或 Edge。** Firefox / Safari 对 File System Access API 支持不全，自动备份功能会不可用。
 
-## 在 Windows 上当桌面应用用
+## 日常使用
 
-开发阶段用 `npm run dev` 在浏览器里调试就够了。日常使用时，在 Edge 里打开地址后点地址栏的「安装」图标，它会变成独立窗口应用——有自己的任务栏图标、能用 `Alt+Tab` 切换，离线也能用。
+**地址是 `http://127.0.0.1:24816/`，这个地址不要改。** 它同时决定了四件事：笔记存在哪、离线缓存存在哪、装出来的桌面应用是哪一个、任务栏上那个图标是谁。换一个端口不会迁移任何东西——你会看到一个空的应用、任务栏上多出来的第二个图标，而笔记还留在旧端口下。
+
+第一次装：
+
+```bash
+npm run build
+npm run serve
+```
+
+然后在 Edge 里打开 `http://127.0.0.1:24816/`，点地址栏右侧的「安装」图标（一个带加号的显示器）。装完会有自己的任务栏图标，`Alt+Tab` 能切过去。
+
+**装完之后就不需要开着服务器了。** Service Worker 把整个应用（约 3.5MB，148 个文件）缓存了下来，双击图标直接打开，服务器关着也行。实测过：关掉浏览器、服务器全程没启动、重新打开，应用正常。
+
+只有两种情况需要再跑一次 `npm run serve`：
+
+- **改了代码要更新。** 重新 `npm run build`，起一次服务器，在设置页点「立即更新」。
+- **离线缓存被清掉了**（比如手动清理了浏览器数据）。应用会打不开，跑一次服务器打开一次就恢复了，笔记数据不受影响。
 
 ## 技术栈
 
@@ -31,10 +50,20 @@ npm run lint     # oxlint
 | 状态 | Zustand |
 | 编辑器 | Milkdown Crepe（Markdown 即时渲染） |
 | 打包 / 备份 | fflate + File System Access API |
+| 离线 / 安装 | 手写 Service Worker + Web App Manifest（无 Workbox 依赖） |
 
 ## 目录结构
 
 ```
+scripts/                    构建与运维脚本（不进打包产物）
+├── lib/
+│   ├── cdp.mjs             用 CDP 驱动 Edge 的最小客户端
+│   ├── png.mjs             读 PNG 的 IHDR，用来断言图标尺寸和透明度
+├── build-icons.mjs         从 icon.svg 生成四个 PNG
+├── build-sw.mjs            构建后生成 dist/sw.js
+├── sw.template.js          Service Worker 源码（带占位符）
+├── serve.mjs               本地静态服务器
+└── verify-pwa.mjs          端到端验证离线能力
 src/
 ├── types/
 │   ├── models.ts           领域模型，对应文档 §4
@@ -49,6 +78,9 @@ src/
 │       ├── archive.ts      打包与解包（与 format.ts 严格对称）
 │       ├── fsAccess.ts     File System Access API 封装
 │       └── service.ts      自动备份的执行流程（镜像 + 快照 + 轮转）
+├── pwa/
+│   ├── register.ts         Service Worker 注册
+│   └── swStore.ts          离线状态 / 更新提示
 ├── store/                  Zustand 全局状态（主题、备份）
 ├── components/
 │   ├── layout/             整体布局与侧边栏
@@ -66,6 +98,7 @@ src/
 | M1 科目与章节 | ✅ 完成 |
 | M2 笔记编辑器（Milkdown + 图片） | ✅ 完成 |
 | M3 检索与备份 | ✅ 完成 |
+| PWA：安装为桌面应用 + 离线可用 | ✅ 完成 |
 | M4 打磨 | 待开始 |
 
 ## 编辑器
@@ -88,7 +121,7 @@ src/
 
 ## 数据安全与备份
 
-**这是本项目最重要的一组功能。** 笔记存在浏览器的 IndexedDB 里，站点数据被清理就会全部丢失。设计文档 §7.4 定了三层防护，M3 已全部落地，入口在侧栏「设置与备份」：
+**这是本项目最重要的一组功能。** 笔记存在浏览器的 IndexedDB 里，站点数据被清理就会全部丢失。设计文档 §7.4 定了三层防护，入口在侧栏「设置与备份」：
 
 | 层级 | 实现 |
 | --- | --- |
@@ -102,9 +135,29 @@ src/
 
 开发服务器跑起来后访问 `/dev/db-check`，可以一键验证 IndexedDB 的读写与级联删除是否正常。它会创建临时数据并在结束时清理干净，不会污染真实笔记。等功能稳定后这个页面可以删掉。
 
+## 离线与安装
+
+**为什么能脱开服务器**：`scripts/build-sw.mjs` 在每次构建后扫一遍 `dist/`，把所有资源写进 `dist/sw.js` 的预缓存清单，清单内容的哈希当缓存名。Service Worker 装好之后，导航请求由它直接用缓存的 `/index.html` 应答，客户端路由交给 React Router 解析。
+
+几个不显然的设计决定：
+
+- **预缓存跳过 `.woff` 和 `.ttf`。** 每个 KaTeX 的 `@font-face` 都把 `woff2` 列在 `src` 的第一位，而 Edge 支持 woff2，后面两个格式永远不会被请求。这一条省掉 40 个文件约 798KB。
+- **`install` 里不调 `skipWaiting()`，`activate` 里不调 `clients.claim()`。** 如果调了：你开着应用的时候重新构建，新 SW 会立刻接管并删掉旧缓存，而运行中的页面内存里还是旧模块图，它懒加载 `NotePage` 时请求的是新哈希文件——那些文件已经不在磁盘上，路由会静默挂掉。延迟之后，旧页面继续用旧缓存服务，你点「更新」才切换。
+- **代价是：因为导航走缓存优先，普通刷新永远拿不到新版本。「立即更新」是唯一的更新入口**，所以设置页那一个区块不能省。
+- **`fetch` 里先判断协议再判断 origin。** `blob:` URL 的 origin 就是页面自己的 origin，只判 origin 会把笔记里的图片请求也拦下来，而 CacheStorage 只接受 http(s)，缓存操作会直接抛。
+- **资源请求失败时绝不回退到 `index.html`。** 模块脚本收到 HTML 会报 `Unexpected token '<'`，把「文件缺失」伪装成语法错误。
+
+验证方式是 `npm run verify:pwa`，22 项断言，包括「清空 HTTP 缓存后断网仍能打开」和「关掉浏览器重开、服务器全程没启动仍能打开」。
+
+### 为什么自己写服务器而不用 `vite preview`
+
+两个原因。一是端口必须固定且**绝不自动切换**——`serve.mjs` 遇到端口被占用会直接报错退出，因为静默换端口会让你的笔记「消失」（它们还在旧端口下）。二是 `vite preview` 对任何 404 都回 `index.html`，于是一个缺失的分片会返回 HTML，浏览器报 `Unexpected token '<'`，把「文件没了」伪装成语法错误。`serve.mjs` 的 SPA 回退只对不带扩展名的路径生效。
+
 ## 注意事项
 
 - **备份权限按会话过期。** 重新打开 App 后需要点一下「重新授权」——这是浏览器的安全模型，绕不过去。
 - **备份文件夹里的 `笔记/` 和 `images/` 只增不删。** 在 App 里删掉一篇笔记，文件夹里对应的 `.md` 不会被清理。这样做是为了绝不误删用户文件；恢复以 `data.json` 为准，残留文件不影响结果。
-- **IndexedDB 按浏览器 + 用户配置隔离。** 换浏览器或换用户配置打开，看到的是空的。请固定用一个入口（建议装成 PWA）。
+- **IndexedDB 按浏览器 + 用户配置隔离。** 换浏览器或换用户配置打开，看到的是空的。装成桌面应用之后请固定用它作为入口。
+- **应用图标在安装时就被 Chromium 快照下来了。** 之后改 `public/icon.svg` 不会更新任务栏图标，需要卸载重装（卸载不会删数据）。
+- **装完之后设置页的「浏览器占用」会涨约 3.5MB**，那是离线缓存。不是泄漏。
 - **自动备份只在 App 开着的时候跑。**

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="学习笔记">
+  <!--
+    应用图标的唯一源文件。三处用到它：
+      1. 浏览器标签页的 favicon（index.html 里 <link rel="icon">）
+      2. npm run icons 生成四个 PNG 时的输入
+      3. manifest.webmanifest 里那条 sizes:"any" 的 SVG 图标
+
+    改这里之后要重新跑一次 npm run icons。
+
+    图形是一页折了角的纸，加三条横线。试过摊开的书，但在 192px 下
+    两片叶子会读成两个色块——曲线的弧度和比例都撑不住那么小的尺寸。
+
+    三条横线和折角都是用 evenodd 挖出来的**洞**，不是画上去的白色。
+    因为 build-icons.mjs 生成 maskable 变体时会把整个图形重上色成白色，
+    内部若有第二层白色填充会被一起涂掉，只剩一个白方块。
+  -->
+  <g fill="#863bff">
+    <path fill-rule="evenodd" d="
+      M128 124 Q128 96 156 96 L296 96 L384 184 L384 388 Q384 416 356 416 L156 416 Q128 416 128 388 Z
+      M296 96 L296 146 Q296 184 334 184 L384 184 Z
+      M168 232 H344 V258 H168 Z
+      M168 286 H344 V312 H168 Z
+      M168 340 H290 V366 H168 Z
+    "/>
+  </g>
+</svg>

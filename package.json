@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "icons": "node scripts/build-icons.mjs",
+    "serve": "node scripts/serve.mjs",
+    "verify:pwa": "node scripts/verify-pwa.mjs",
+    "lint": "oxlint"
   },
   "dependencies": {
     "@milkdown/kit": "^7.22.1",

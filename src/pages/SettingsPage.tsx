@@ -17,6 +17,7 @@ import { downloadBlob, pickFile } from '@/lib/download'
 import { formatBytes } from '@/lib/format'
 import { formatDateTime } from '@/lib/time'
 import { cn } from '@/lib/cn'
+import { useSwStore } from '@/pwa/swStore'
 import { BackupRepository, type IntegrityReport } from '@/repository'
 import { useBackupStore } from '@/store/backupStore'
 
@@ -88,7 +89,24 @@ export function SettingsPage() {
   const [integrity, setIntegrity] = useState<IntegrityReport | null>(null)
   const [exportFirst, setExportFirst] = useState(true)
 
+  const [standalone, setStandalone] = useState(false)
+  const [checkMessage, setCheckMessage] = useState<string | null>(null)
+
   const backup = useBackupStore()
+  const sw = useSwStore()
+
+  const handleCheckUpdate = async () => {
+    setCheckMessage(null)
+    const result = await sw.checkForUpdate()
+    setCheckMessage(
+      result === 'updated'
+        ? '发现新版本，看上面的提示。'
+        : result === 'current'
+          ? '已经是最新版本。'
+          : '连不上本地服务器，没法检查。这本身是正常的——平时不需要开着服务器，' +
+            '只有重新构建之后想更新时才需要先跑一次 npm run serve。',
+    )
+  }
 
   const refreshCounts = () => {
     void BackupRepository.counts().then(setCurrentCounts)
@@ -102,6 +120,7 @@ export function SettingsPage() {
       .then(setPersisted)
       .catch(() => setPersisted(null))
     void BackupRepository.counts().then(setCurrentCounts)
+    setStandalone(window.matchMedia('(display-mode: standalone)').matches)
     // 只在进入页面时跑一次。backup.hydrate 内部是幂等的
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -275,6 +294,101 @@ export function SettingsPage() {
               </Notice>
             </div>
           ) : null}
+        </Section>
+
+        {/* ---------- 应用与离线 ---------- */}
+        <Section
+          title="应用与离线"
+          description="装成桌面应用之后，双击任务栏图标就能打开，不需要先启动任何东西。"
+        >
+          {!import.meta.env.PROD ? (
+            <Notice tone="info">
+              开发模式下不注册 Service Worker——否则它会把 vite 的开发产物缓存起来，
+              改代码看不到效果，而且很难联想到原因。这一节的信息要
+              <code className="mx-1">npm run build</code> 之后用
+              <code className="mx-1">npm run serve</code> 打开才准确。
+            </Notice>
+          ) : sw.support === 'unsupported' ? (
+            <Notice tone="warn">
+              当前浏览器不支持 Service Worker，断网时打不开。请改用 Edge 或 Chrome。
+            </Notice>
+          ) : sw.support === 'failed' ? (
+            <Notice tone="error">
+              Service Worker 注册失败：{sw.error}。
+              在线使用不受影响，但断网时打不开这个应用。
+            </Notice>
+          ) : (
+            <div className="space-y-4">
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+                <div>
+                  <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                    打开方式
+                  </dt>
+                  <dd className="mt-0.5">
+                    {standalone ? '独立窗口（已安装）' : '浏览器标签页'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-neutral-500 dark:text-neutral-400">
+                    离线可用
+                  </dt>
+                  <dd className="mt-0.5">
+                    {sw.support === 'unknown'
+                      ? '正在准备…'
+                      : sw.offlineReady
+                        ? '已就绪'
+                        : '正在准备…'}
+                  </dd>
+                </div>
+              </dl>
+
+              {!standalone ? (
+                <Notice tone="info">
+                  想装成桌面应用：点浏览器地址栏右侧的「安装」图标（一个带加号的显示器）。
+                  装完会有自己的任务栏图标，用 Alt+Tab 就能切过去。
+                </Notice>
+              ) : null}
+
+              {sw.updateReady ? (
+                <Notice tone="warn">
+                  有新版本已经下载好了，正在等你确认。
+                  <div className="mt-2">
+                    <Button size="sm" onClick={() => sw.applyUpdate()}>
+                      立即更新并重新打开
+                    </Button>
+                  </div>
+                </Notice>
+              ) : null}
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => void handleCheckUpdate()}
+                  disabled={sw.checking}
+                >
+                  {sw.checking ? '正在检查…' : '检查更新'}
+                </Button>
+                {checkMessage ? (
+                  <span className="text-xs text-neutral-500 dark:text-neutral-400">
+                    {checkMessage}
+                  </span>
+                ) : null}
+              </div>
+
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                因为离线缓存是优先于网络的，<strong className="font-medium">普通刷新不会拿到新版本</strong>
+                ——有新版本时必须点上面那个「立即更新」。这是唯一的更新入口。
+              </p>
+
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                万一离线缓存被清掉了（比如手动清理了浏览器数据），而本地服务器又没开着，
+                应用会打不开。<strong className="font-medium">恢复办法</strong>：在项目目录跑一次{' '}
+                <code className="rounded bg-neutral-100 px-1 dark:bg-neutral-800">npm run serve</code>
+                ，打开一次之后缓存就回来了。笔记数据不受影响。
+              </p>
+            </div>
+          )}
         </Section>
 
         {/* ---------- 导出 ---------- */}

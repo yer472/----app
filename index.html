@@ -2,9 +2,56 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!--
+      两条 theme-color 的**顺序是契约**：第 0 条浅色、第 1 条深色。
+      下面的内联脚本和 src/store/uiStore.ts 里的 applyTheme 都按下标定位它们。
+      调换顺序会让标题栏颜色和实际主题正好相反。
+
+      为什么需要两条：manifest 里的 theme_color 是静态的，只能表达一种主题；
+      而本应用的主题是用户可以手选的，可能和系统偏好相反。
+      浏览器取的规则是「第一条 media 匹配的生效」，所以用 media 属性来切换。
+    -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171717" media="(prefers-color-scheme: dark)" />
+
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>学习笔记</title>
+
+    <script>
+      /*
+        首屏主题提示。
+
+        真正的主题设置存在 IndexedDB 的 settings 表里，要等 src/store/uiStore.ts
+        异步读回来（还要过一道 8 秒超时）。在那之前 <html> 上没有 dark class，
+        所以深色模式下每次启动都会先白一下——装成独立窗口之后这一下更明显，
+        因为它同时是窗口的启动底色。
+
+        这里的 localStorage 只是一个**提示位**，不是数据源：
+        允许过期、允许缺失、允许写失败（隐私模式下会抛）。
+        读错了也只是闪一下，hydrate 之后会被纠正回正确值。
+      */
+      try {
+        // 必须和 src/store/uiStore.ts 里的 THEME_STORAGE_KEY 保持一致。
+        // 内联脚本没法 import，只能是一份字面量，两边都留了交叉注释。
+        var KEY = 'xxbj.theme'
+        var theme = localStorage.getItem(KEY) || 'system'
+        var dark =
+          theme === 'dark' ||
+          (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)
+
+        if (dark) document.documentElement.classList.add('dark')
+
+        // 同步标题栏颜色。下标对应上面那两条 meta，顺序不能变。
+        var metas = document.querySelectorAll('meta[name="theme-color"]')
+        if (metas[0]) metas[0].setAttribute('media', dark ? 'not all' : 'all')
+        if (metas[1]) metas[1].setAttribute('media', dark ? 'all' : 'not all')
+      } catch (e) {
+        /* localStorage 被禁用时静默跳过，hydrate 之后主题依然正确 */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
