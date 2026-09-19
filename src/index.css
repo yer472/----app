@@ -1,0 +1,93 @@
+@import 'tailwindcss';
+
+/* 用 class 控制深色模式（而不是跟随系统媒体查询），这样可以在设置里手动切换 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* 中文优先的字体栈，Windows 上落到微软雅黑 */
+  --font-sans:
+    'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', system-ui,
+    sans-serif;
+  --font-mono: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 笔记正文的滚动条在深色模式下不要太扎眼 */
+* {
+  scrollbar-color: var(--color-neutral-400) transparent;
+}
+.dark * {
+  scrollbar-color: var(--color-neutral-600) transparent;
+}
+
+/* ------------------------------------------------------------------
+   Milkdown Crepe 编辑器
+   ------------------------------------------------------------------
+   Crepe 自带的深色主题是写死在 `.milkdown` 选择器上的，
+   直接引入会和浅色主题互相覆盖。这里只引浅色主题（在 NoteEditor.tsx 里），
+   深色由下面的 `.dark .milkdown` 覆盖变量实现——选择器权重更高，一定生效。
+   ------------------------------------------------------------------ */
+/*
+   注意这里的选择器必须带 `.note-editor` 前缀。
+   Crepe 自己的样式表也写在 `.milkdown` 上，权重相同的情况下后加载的赢——
+   而编辑器的 CSS 在懒加载 chunk 里，一定比 index.css 后到。
+   不加前缀的话这几行会被静默覆盖掉（字体覆盖就是这么失效过一次）。
+*/
+.note-editor .milkdown {
+  --crepe-font-default:
+    'Segoe UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  --crepe-font-title:
+    'Segoe UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  --crepe-font-code: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  --crepe-base-font-size: 15px;
+  background: transparent;
+}
+
+.dark .note-editor .milkdown {
+  --crepe-color-background: #171717;
+  --crepe-color-on-background: #e5e5e5;
+  --crepe-color-surface: #1f1f1f;
+  --crepe-color-surface-low: #1a1a1a;
+  --crepe-color-on-surface: #d4d4d4;
+  --crepe-color-on-surface-variant: #a3a3a3;
+  --crepe-color-outline: #525252;
+  --crepe-color-primary: #d4d4d4;
+  --crepe-color-secondary: #404040;
+  --crepe-color-on-secondary: #e5e5e5;
+  --crepe-color-inverse: #e5e5e5;
+  --crepe-color-on-inverse: #262626;
+  --crepe-color-inline-code: #f87171;
+  --crepe-color-error: #f87171;
+  --crepe-color-hover: #262626;
+  --crepe-color-selected: #333333;
+  --crepe-color-inline-area: #2e2e2e;
+  --crepe-shadow-1:
+    0px 1px 2px 0px rgba(255, 255, 255, 0.16),
+    0px 1px 3px 1px rgba(255, 255, 255, 0.08);
+  --crepe-shadow-2:
+    0px 1px 2px 0px rgba(255, 255, 255, 0.16),
+    0px 2px 6px 2px rgba(255, 255, 255, 0.08);
+}
+
+/* 正文里的图片：不要超出编辑区宽度，圆角与整体风格一致 */
+.note-editor .milkdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
+}
+
+/* Crepe 默认给内容区加了较大的上下边距，笔记页面已经是分栏布局，收紧一些 */
+.note-editor .milkdown .ProseMirror {
+  padding-block: 0;
+  min-height: 50vh;
+}
