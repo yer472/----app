@@ -277,8 +277,13 @@ try {
    * 「正文里的图缺一块、metadata 里的数据却完好」。靠注释提醒「两处都要改」
    * 是拦不住的，所以改成对拍：同一份场景，两边渲染出来的元素必须逐属性相同。
    *
-   * 只比几何，不比样式——描边色和线宽在两边是两套写法（React prop / setAttribute），
-   * 本来就该各管各的。
+   * 属性清单**必须包含填充色、字体、字号、文字对齐和文字内容**，不能只比几何。
+   * 这几样在两边是各写一遍的（React prop / setAttribute），漏改任何一处都表现成
+   * 「画布上有、正文里的图里没有」——而只比几何的对拍对它恰好是瞎的，那正是
+   * 「做一个能抓这类故障的断言」这件事最容易失效的方式。
+   *
+   * 这套清单本身也会漏（加了新属性没人提醒你加进来），所以它在代码里就写着
+   * 一条给下一个人的规矩：往 `partToDom` 里加属性时，先问这句断言比不比得到。
    */
   await check('★ 画布渲染与导出渲染逐属性一致', async () => {
     const r = await evaluate(`(async () => {
@@ -288,10 +293,15 @@ try {
       const scene = ser.parseSceneFromSvg(await att.blob.text())
       if (!scene) return { error: '存出去的 SVG 读不回来' }
 
-      const GEOM = ['x1','y1','x2','y2','x','y','width','height','cx','cy','rx','ry','points']
+      const ATTRS = [
+        'x1','y1','x2','y2','x','y','width','height','cx','cy','rx','ry','points',
+        'fill','stroke','stroke-width','font-size','font-family','text-anchor',
+      ]
       const partsOf = (root) => [...(root.querySelector('g')?.children ?? [])].map((el) => {
         const o = { tag: el.tagName }
-        for (const k of GEOM) if (el.hasAttribute(k)) o[k] = el.getAttribute(k)
+        for (const k of ATTRS) if (el.hasAttribute(k)) o[k] = el.getAttribute(k)
+        // 文字内容也要比：「属性全对但字没了」靠属性是查不出来的
+        if (el.textContent) o.text = el.textContent
         return o
       })
       return {

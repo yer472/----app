@@ -1,6 +1,6 @@
 import { newId } from '@/lib/id'
 import type { ID } from '@/types/models'
-import type { Point, Shape } from '@/types/scene'
+import type { Flow, FlowSide, Point, SceneNode, Shape } from '@/types/scene'
 // 只引类型。symbols.ts 反过来要引这里的 Point，于是两边构成一个**纯类型**的
 // 循环——`import type` 在编译后会被完全抹掉，运行期没有这个环。
 // 别把它改成值导入，那才会真的转不起来。
@@ -21,7 +21,14 @@ import { builtInPointDef, hitsParts, linkDef } from './symbols'
 
 // 图元的**数据形状**在 types/scene.ts（数据访问层也要用它们，放在这里会让
 // db/ 反过来 import components/）。这里 re-export，老代码不用改。
-export type { Point, Shape, ShapeKind } from '@/types/scene'
+export type {
+  Flow,
+  FlowSide,
+  Point,
+  SceneNode,
+  Shape,
+  ShapeKind,
+} from '@/types/scene'
 
 export interface Scene {
   /** 图纸的逻辑尺寸，坐标系的边界 */
@@ -50,6 +57,46 @@ export interface Scene {
    */
   defs?: Record<string, PointSymbolDef>
 }
+
+/**
+ * 跨图形上下文：**一个图形的几何可能需要知道别的图形在哪**。
+ *
+ * 今天只有流向用得上——它的两端是模块的 id，画到哪里去要按 id 查那两个模块
+ * 的位置。其它图形（直线、矩形、符号……）的几何只依赖自己，收下这个上下文
+ * 也用不着，所以只有真的要跨图形信息的两个函数收它：`shapeToParts`
+ * （算渲染几何）和 `hitsShape`（算命中）。
+ *
+ * ⚠️ **这两个函数的 `ctx` 是必填参数，不许改成可选。** 改成可选的话，
+ * 任何一个忘了传的调用点都会**在两个渲染器上同时静默地什么都不画**——
+ * 画布上少一块、导出的图里也少一块，两边都不报错。那正是当初把
+ * `ShapeView` 和 `createShapeElement` 合并成 `shapeToParts` 要消灭的那类故障
+ * （见 render.tsx 的文件头）。必填才会逼着每个调用点表态。
+ */
+export interface SceneContext {
+  /** 内联在场景里的点符号定义 */
+  defs: SceneDefs
+  /**
+   * 按 id 索引的全部图形。
+   *
+   * 装的是**整个场景**而不只是模块：这样将来任何一种「引用别的图形」的新
+   * 图形都能直接用，不用再动这个类型；查出来的东西是不是自己要的种类，
+   * 由用它的那个函数自己判（流向会检查它查到的两条都是不是 `node`）。
+   */
+  byId: ReadonlyMap<ID, Shape>
+}
+
+/** 收一次场景，供需要跨图形信息的地方用 */
+export function contextOf(scene: Scene): SceneContext {
+  return { defs: scene.defs, byId: new Map(scene.shapes.map((s) => [s.id, s])) }
+}
+
+/**
+ * 「没有别的图形可查」的空上下文。
+ *
+ * 自定义符号的图元用它：符号的定义被摊平成一份零件表存进场景，
+ * 之后就是**自成一体的局部坐标系**，跟画布上别的东西没有关系。
+ */
+export const EMPTY_CONTEXT: SceneContext = { defs: undefined, byId: new Map() }
 
 /** 图纸默认尺寸。4:3，够画一个四杆机构还有余量 */
 export const PAGE_WIDTH = 1200
@@ -161,7 +208,8 @@ export const SNAP_TOLERANCE = 12
  * 一个形状上「值得对上去」的点。
  *
  * 矩形的四个角算——把一条线吸到矩形的角上是常事。手绘只有首尾算，
- * 中间的点是笔迹本身，吸上去只会让线条变形。
+ * 中间的点是笔迹本身，吸上去只会让线条变形。模块和矩形同理：把一条自由
+ * 直线吸到模块的角上是常事。
  */
 export function snapTargetsOf(shape: Shape, defs: SceneDefs): Point[] {
   switch (shape.kind) {
@@ -169,7 +217,8 @@ export function snapTargetsOf(shape: Shape, defs: SceneDefs): Point[] {
     case 'link':
       return [shape.a, shape.b]
     case 'rect':
-    case 'ellipse': {
+    case 'ellipse':
+    case 'node': {
       const r = normalizeRect(shape.a, shape.b)
       return [
         { x: r.x, y: r.y },
@@ -188,6 +237,10 @@ export function snapTargetsOf(shape: Shape, defs: SceneDefs): Point[] {
     // 靠的就是把这里也算成吸附目标
     case 'symbol':
       return symbolAnchors(shape, defs)
+    // 流向没有可吸的点：它的两端是**推导**出来的，不是用户摆的。
+    // 把它算成吸附目标只会让自由图元的端点莫名其妙地被拽过去
+    case 'flow':
+      return []
     default:
       return assertNever(shape)
   }
@@ -315,6 +368,359 @@ export function symbolAnchors(shape: Shape, defs: SceneDefs): Point[] {
 
 export type SceneDefs = Scene['defs']
 
+// ---------------------------------------------------------------- 模块图
+
+/**
+ * 模块的默认尺寸。**点一下**（没有拖）就用它造一个——单击就该得到一个模块，
+ * 而不是「什么都没发生」。
+ */
+export const NODE_DEFAULT_WIDTH = 160
+export const NODE_DEFAULT_HEIGHT = 56
+
+/** 模块里标签的字号。写死不缩放：「同一个字号」是要拿去和别处比的 */
+export const NODE_FONT_SIZE = 22
+
+/** 标签两侧至少留的空白（图纸单位）。文字超了就把模块**拉宽** */
+export const NODE_PADDING_X = 14
+
+/** 新建模块时的占位文字。一落地就进文字编辑、整段选中，所以它会被直接替掉 */
+export const NODE_DEFAULT_TEXT = '新模块'
+
+/** 新建模块（或改完文字发现放不下）时的最小宽度 */
+export const NODE_MIN_WIDTH = 96
+/** 最小高度。太扁的模块里文字会顶到上下边框 */
+export const NODE_MIN_HEIGHT = 40
+
+/**
+ * 单击造出来的模块（宽高都几乎是 0）撑成默认尺寸。
+ *
+ * **只处理「点了一下」**：拖出来的小模块原样返回——那是用户自己拉的尺寸，
+ * 替它做主不合适。判据用 4 而不是 0，因为单击也会带上一两个单位的抖动。
+ */
+export function withDefaultNodeSize(node: SceneNode): SceneNode {
+  const r = nodeRect(node)
+  if (r.w > 4 || r.h > 4) return node
+  const x = Math.min(node.a.x, node.b.x)
+  const y = Math.min(node.a.y, node.b.y)
+  return {
+    ...node,
+    a: { x, y },
+    b: { x: x + NODE_DEFAULT_WIDTH, y: y + NODE_DEFAULT_HEIGHT },
+  }
+}
+
+/**
+ * 折线拉直的容差（图纸单位）。
+ *
+ * 两个模块的纵向中线差半个单位时，画一条带 0.5 单位台阶的三折线看起来就是个
+ * 毛刺；按「差得看不出来就算对齐」处理，拉直时取两边的中点把零头消掉。
+ */
+const FLOW_ALIGN_EPSILON = 1
+
+function clamp(value: number, lo: number, hi: number): number {
+  return Math.min(Math.max(value, lo), hi)
+}
+
+/** 模块的矩形，归一化成「左上角 + 宽高」 */
+export function nodeRect(node: SceneNode): {
+  x: number
+  y: number
+  w: number
+  h: number
+} {
+  return normalizeRect(node.a, node.b)
+}
+
+/**
+ * 模块标签的字号。
+ *
+ * 模块很扁时跟着缩——字号不缩的话文字会顶到上下边框外面去。上限是
+ * `NODE_FONT_SIZE`，所以正常高度的模块字号一致。
+ */
+export function nodeFontSize(node: SceneNode): number {
+  return Math.min(NODE_FONT_SIZE, nodeRect(node).h * 0.55)
+}
+
+/**
+ * 基线的位置相对文字块中心的偏移比例。
+ *
+ * 不用 SVG 的 `dominant-baseline`：那个属性在「独立文档里的 SVG」这条渲染路径上
+ * 各家实现不一，属于会静默失效的那类开关（见 render.tsx 里关于不用 `scale()`
+ * 和不用 `marker` 的同类理由）。把偏移直接算进 `y` 是确定性的。
+ *
+ * 0.35 是「半个大写字母高度」的经验值：拉丁字母和汉字的视觉中心都落在那儿。
+ */
+const LABEL_BASELINE_RATIO = 0.35
+
+/** 模块标签的绘制位置：水平居中，垂直靠基线那个偏移找齐 */
+export function nodeLabelAt(node: SceneNode): Point {
+  const r = nodeRect(node)
+  return {
+    x: r.x + r.w / 2,
+    y: r.y + r.h / 2 + nodeFontSize(node) * LABEL_BASELINE_RATIO,
+  }
+}
+
+/**
+ * 一条流向的折线路径。**全部几何只有这一处**，两个渲染器和命中测试共用
+ * ——和 `shapeToParts` 是同一个原则。
+ *
+ * 两端有一个查不到、或查到的不是模块时返回 null。调用方各自决定怎么表现
+ * （渲染画一个可见的占位，命中当作打不着），这里只管算。
+ *
+ * **端口坐标是「瞄准目标中心」**，这是这张图看起来对不对的关键：底下那根通栏
+ * 长条往上指的箭头，必须落在**目标方框的中心正下方**，而不是长条自己的中心。
+ * 具体是——
+ *
+ * - 出口：**目标**的中线，夹进源模块的跨度里（长条比方框宽得多，所以夹完还是
+ *   方框的中心）；
+ * - 入口：**就是目标自己的中线**。
+ *
+ * 入口不能写成「源的中线夹进目标跨度」——那种对称写法看起来很合理，但长条→窄
+ * 方框时会算出「夹到方框的边上」，于是箭头从方框的**右边缘**斜着进来，而且整条
+ * 路径多出一个横折。这正是自检第一次跑就抓到的那条。
+ *
+ * 两个方框在同一水平线上时两边算出来的坐标相同，于是自然退化成一条直线段。
+ *
+ * 往哪个方向走，按「两端在四个方向上各隔了多远」取最大的那个。四个方向都被
+ * 挡住（两个模块重叠）时退化成向右——总得画点什么出来。
+ */
+export function routeFlow(flow: Flow, ctx: SceneContext): Point[] | null {
+  const from = ctx.byId.get(flow.from)
+  const to = ctx.byId.get(flow.to)
+  if (from?.kind !== 'node' || to?.kind !== 'node') return null
+
+  const r1 = nodeRect(from)
+  const r2 = nodeRect(to)
+
+  // 顺序即优先级：严格大于才换，所以并列时取靠前的那个，也就是先横后竖
+  const candidates: readonly { side: FlowSide; gap: number }[] = [
+    { side: 'right', gap: r2.x - (r1.x + r1.w) },
+    { side: 'left', gap: r1.x - (r2.x + r2.w) },
+    { side: 'bottom', gap: r2.y - (r1.y + r1.h) },
+    { side: 'top', gap: r1.y - (r2.y + r2.h) },
+  ]
+  let best = candidates[0] ?? { side: 'right' as FlowSide, gap: 0 }
+  for (const candidate of candidates) {
+    if (candidate.gap > best.gap) best = candidate
+  }
+  const side: FlowSide = best.gap > 0 ? best.side : 'right'
+
+  const targetCx = r2.x + r2.w / 2
+  const targetCy = r2.y + r2.h / 2
+
+  const horizontal = side === 'right' || side === 'left'
+
+  const start: Point = horizontal
+    ? {
+        x: side === 'right' ? r1.x + r1.w : r1.x,
+        y: clamp(targetCy, r1.y, r1.y + r1.h),
+      }
+    : {
+        x: clamp(targetCx, r1.x, r1.x + r1.w),
+        y: side === 'bottom' ? r1.y + r1.h : r1.y,
+      }
+
+  // 入口就在目标的中线上：箭头的落点固定是「目标中心的正面」，
+  // 源那一侧负责去够它（见上面那段注释）
+  const end: Point = horizontal
+    ? { x: side === 'right' ? r2.x : r2.x + r2.w, y: targetCy }
+    : { x: targetCx, y: side === 'bottom' ? r2.y : r2.y + r2.h }
+
+  const drift = horizontal ? start.y - end.y : start.x - end.x
+  if (Math.abs(drift) <= FLOW_ALIGN_EPSILON) {
+    // 对齐了（或者差得看不出来）：拉成一条直线，取中点消掉那点零头
+    return horizontal
+      ? [
+          { x: start.x, y: (start.y + end.y) / 2 },
+          { x: end.x, y: (start.y + end.y) / 2 },
+        ]
+      : [
+          { x: (start.x + end.x) / 2, y: start.y },
+          { x: (start.x + end.x) / 2, y: end.y },
+        ]
+  }
+
+  // 没对齐：折三段——出去、横穿、进来。拐点取中点，两头对称
+  const mid = horizontal ? (start.x + end.x) / 2 : (start.y + end.y) / 2
+  return horizontal
+    ? [start, { x: mid, y: start.y }, { x: mid, y: end.y }, end]
+    : [start, { x: start.x, y: mid }, { x: end.x, y: mid }, end]
+}
+
+// ---------------------------------------------------------------- 对齐辅助线
+
+/** 对齐的吸附容差（图纸单位）。比端点吸附小——对齐是「看着差不多」，不是「接上」 */
+export const ALIGN_THRESHOLD = 6
+
+/** 一条候选的对齐位置。`x` 是竖线，`y` 是横线 */
+export interface AlignCandidate {
+  axis: 'x' | 'y'
+  at: number
+}
+
+/**
+ * 别的方框上「值得对齐」的位置：左 / 中 / 右、上 / 中 / 下。
+ *
+ * **只收有 `a`/`b` 的方框类图形**（矩形、椭圆、模块）。理由不是省事：辅助线的
+ * 意义是「把两个东西的左边缘对齐」，而自由线条和符号压根没有「左边缘」。
+ *
+ * ⚠️ `excludeId` 是**必须传对**的：候选要排除正在被拖的那一个。不排除的话，
+ * 拖动过程中它自己的位置也在候选里（`onLive` 已经更新了场景），于是它会吸到
+ * 自己身上、一动都动不了——`draw` 手势当初就踩过这个坑（见 BoardCanvas 里
+ * `targets` 的注释）。
+ */
+export function collectAlignCandidates(
+  scene: Scene,
+  excludeId: ID,
+): AlignCandidate[] {
+  const out: AlignCandidate[] = []
+  for (const shape of scene.shapes) {
+    if (shape.id === excludeId) continue
+    if (shape.kind !== 'rect' && shape.kind !== 'ellipse' && shape.kind !== 'node') {
+      continue
+    }
+    const r = normalizeRect(shape.a, shape.b)
+    out.push(
+      { axis: 'x', at: r.x },
+      { axis: 'x', at: r.x + r.w / 2 },
+      { axis: 'x', at: r.x + r.w },
+      { axis: 'y', at: r.y },
+      { axis: 'y', at: r.y + r.h / 2 },
+      { axis: 'y', at: r.y + r.h },
+    )
+  }
+  return out
+}
+
+/**
+ * 把一个方框吸到候选线上。
+ *
+ * 返回要补的位移，以及**吸上之后确实重合**的那些候选（用来画辅助线）。
+ * 两个轴各取最近的一条，互不影响——所以「左边缘对齐另一块的左边缘」和
+ * 「上边缘对齐另一块的上边缘」可以同时成立，这正是把几块排整齐时想要的。
+ *
+ * 吸附作用在**位置**上、结果用完即弃：调用方每次都从「按下时的基准」重算，
+ * 永远不把吸附后的值存回去，所以来回拖不会有累积漂移。
+ */
+export function alignSnap(
+  box: { x: number; y: number; w: number; h: number },
+  candidates: readonly AlignCandidate[],
+  threshold: number = ALIGN_THRESHOLD,
+): { dx: number; dy: number; guides: readonly AlignCandidate[] } {
+  const own: Record<'x' | 'y', number[]> = {
+    x: [box.x, box.x + box.w / 2, box.x + box.w],
+    y: [box.y, box.y + box.h / 2, box.y + box.h],
+  }
+
+  const best: Record<'x' | 'y', { delta: number; distance: number }> = {
+    x: { delta: 0, distance: Number.POSITIVE_INFINITY },
+    y: { delta: 0, distance: Number.POSITIVE_INFINITY },
+  }
+
+  for (const candidate of candidates) {
+    for (const line of own[candidate.axis]) {
+      const delta = candidate.at - line
+      const distance = Math.abs(delta)
+      if (distance <= threshold && distance < best[candidate.axis].distance) {
+        best[candidate.axis] = { delta, distance }
+      }
+    }
+  }
+
+  const dx = best.x.delta
+  const dy = best.y.delta
+  const snapped: Record<'x' | 'y', number[]> = {
+    x: [box.x + dx, box.x + dx + box.w / 2, box.x + dx + box.w],
+    y: [box.y + dy, box.y + dy + box.h / 2, box.y + dy + box.h],
+  }
+
+  /*
+   * 返回的辅助线要**去重**。
+   *
+   * 候选是按方框生成的，几个方框上下边缘对齐是常态（教材里那一排方框就是），
+   * 于是同一条线会被返回好几次。画面上的后果只是「画了两遍同一条虚线」，
+   * 但 React 那边是重复 key 警告——**每次拖动刷屏几十条**。自检的「页面零报错」
+   * 那一条就是被这个顶红的。
+   */
+  const guides: AlignCandidate[] = []
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    const key = `${candidate.axis}:${candidate.at}`
+    if (seen.has(key)) continue
+    if (snapped[candidate.axis].some((line) => Math.abs(line - candidate.at) < 0.01)) {
+      seen.add(key)
+      guides.push(candidate)
+    }
+  }
+
+  return { dx, dy, guides }
+}
+
+// ---------------------------------------------------------------- 模块缩放
+
+/**
+ * 模块四角的手柄位置，顺序是 左上 → 右上 → 右下 → 左下。
+ *
+ * 和 `handlesOf` **分开**：那个是「可以单独拖的端点」，而 `rect`/`ellipse`
+ * 在那里故意返回 `[]`（「拖角点改尺寸是另一套交互」）。模块沿用同一条规矩，
+ * 于是 `handlesOf(node)` 是空的、联动语义不碰模块，而缩放走这一套。
+ */
+export function resizeHandlesOf(shape: Shape): Point[] {
+  if (shape.kind !== 'node') return []
+  const r = nodeRect(shape)
+  return [
+    { x: r.x, y: r.y },
+    { x: r.x + r.w, y: r.y },
+    { x: r.x + r.w, y: r.y + r.h },
+    { x: r.x, y: r.y + r.h },
+  ]
+}
+
+export interface ResizeHit {
+  shape: SceneNode
+  corner: number
+}
+
+export function hitTestResizeHandle(
+  scene: Scene,
+  p: Point,
+  selectedId: ID | null,
+): ResizeHit | null {
+  if (!selectedId) return null
+  const shape = scene.shapes.find((s) => s.id === selectedId)
+  if (shape?.kind !== 'node') return null
+  const handles = resizeHandlesOf(shape)
+  for (let i = 0; i < handles.length; i += 1) {
+    const at = handles[i]
+    if (at && Math.hypot(at.x - p.x, at.y - p.y) <= HANDLE_HIT_RADIUS) {
+      return { shape, corner: i }
+    }
+  }
+  return null
+}
+
+/** 每个角对应的**对角**（拖它的时候不动的那个角） */
+const OPPOSITE_CORNER = [2, 3, 0, 1]
+
+/**
+ * 把某个角拖到 `to`，**对角保持不动**。
+ *
+ * 直接写回 `a`/`b` 这两个对角点：它们本来就是「哪两个角」而不是「左上和右下」，
+ * 所以把固定的那个角写进 `a`、被拖的写进 `b` 就完事了，不需要算宽高。
+ * 拖过头时 `a`/`b` 的左右关系会翻转，`normalizeRect` 照常处理。
+ */
+export function withResizedCorner(
+  node: SceneNode,
+  corner: number,
+  to: Point,
+): SceneNode {
+  const handles = resizeHandlesOf(node)
+  const fixed = handles[OPPOSITE_CORNER[corner] ?? 2]
+  if (!fixed) return node
+  return { ...node, a: fixed, b: to }
+}
+
 // ---------------------------------------------------------------- 命中测试
 
 /** 点是否落在椭圆内部（含容差）。用于椭圆的选中判定 */
@@ -331,14 +737,15 @@ function insideEllipse(p: Point, a: Point, b: Point, tolerance: number): boolean
 /**
  * 命中判定。
  *
- * `defs` 只有点符号用得上：把查询点**逆变换回符号的局部坐标系**，再按零件
- * 逐个测——这样命中逻辑不需要为每个符号写一份，加多少符号都一样。
+ * `ctx` 里两样东西各有用处：点符号要 `defs` 把查询点**逆变换回符号的局部
+ * 坐标系**再按零件逐个测（这样命中逻辑不需要为每个符号写一份，加多少符号
+ * 都一样）；流向要 `byId` 查它两端的模块在哪，才知道自己那条折线画到哪。
  */
 function hitsShape(
   shape: Shape,
   p: Point,
   tolerance: number,
-  defs: SceneDefs,
+  ctx: SceneContext,
 ): boolean {
   switch (shape.kind) {
     case 'line':
@@ -349,16 +756,17 @@ function hitsShape(
       return distanceToSegment(p, shape.a, shape.b) <= tolerance + JOINT_HIT_SLACK
     }
     case 'symbol': {
-      const def = defs?.[shape.ref]
+      const def = ctx.defs?.[shape.ref]
       // 定义丢了（老图引用了后来删掉的符号）时退化成「插入点附近能选中」，
       // 这样它至少还能被拖走或删掉，而不是变成一个选不中的幽灵
       if (!def) return Math.hypot(p.x - shape.at.x, p.y - shape.at.y) <= tolerance * 3
       return hitsParts(def.parts, toLocal(p, shape.at, shape.rotation), tolerance)
     }
-    case 'rect': {
+    case 'rect':
+    case 'node': {
       const r = normalizeRect(shape.a, shape.b)
       // 落在矩形范围内就算命中。矩形没有填充，但按内部选中更符合直觉——
-      // 要求必须精确点到边框上会很难用
+      // 要求必须精确点到边框上会很难用。模块有填充，这条就更自然了
       return (
         p.x >= r.x - tolerance &&
         p.x <= r.x + r.w + tolerance &&
@@ -376,6 +784,18 @@ function hitsShape(
           ? distanceToSegment(p, point, next) <= tolerance
           : Math.hypot(p.x - point.x, p.y - point.y) <= tolerance
       })
+    case 'flow': {
+      const points = routeFlow(shape, ctx)
+      // 端点查不到（不该发生，见 `removeShapes` 的级联）时打不着：
+      // 它连画都画不出来，自然也没有可以点中的地方
+      if (!points) return false
+      return points.some((point, i) => {
+        const next = points[i + 1]
+        return next
+          ? distanceToSegment(p, point, next) <= tolerance
+          : Math.hypot(p.x - point.x, p.y - point.y) <= tolerance
+      })
+    }
     default:
       return assertNever(shape)
   }
@@ -391,9 +811,10 @@ export function hitTest(
   p: Point,
   tolerance: number = HIT_TOLERANCE,
 ): Shape | null {
+  const ctx = contextOf(scene)
   for (let i = scene.shapes.length - 1; i >= 0; i -= 1) {
     const shape = scene.shapes[i]
-    if (shape && hitsShape(shape, p, tolerance, scene.defs)) return shape
+    if (shape && hitsShape(shape, p, tolerance, ctx)) return shape
   }
   return null
 }
@@ -409,9 +830,8 @@ export function hitTestAll(
   p: Point,
   tolerance: number = HIT_TOLERANCE,
 ): Shape[] {
-  return scene.shapes.filter((shape) =>
-    hitsShape(shape, p, tolerance, scene.defs),
-  )
+  const ctx = contextOf(scene)
+  return scene.shapes.filter((shape) => hitsShape(shape, p, tolerance, ctx))
 }
 
 // ---------------------------------------------------------------- 场景编辑
@@ -440,7 +860,30 @@ export function replaceShape(
 
 export function removeShapes(scene: Scene, ids: ID[]): Scene {
   const doomed = new Set(ids)
-  return { ...scene, shapes: scene.shapes.filter((s) => !doomed.has(s.id)) }
+  return {
+    ...scene,
+    shapes: scene.shapes.filter((s) => !doomed.has(s.id) && !isOrphanFlow(s, doomed)),
+  }
+}
+
+/** 这条流向的两个端点里有被删掉的吗 */
+function isOrphanFlow(shape: Shape, doomed: ReadonlySet<ID>): boolean {
+  return shape.kind === 'flow' && (doomed.has(shape.from) || doomed.has(shape.to))
+}
+
+/**
+ * 这批图元被删掉时**连带**会消失的图元（今天只有指向它们的流向）。
+ *
+ * 为什么需要它：橡皮的「标红」集合是命中测试算出来的，而命中测试不认识级联
+ * ——于是「屏幕上标红的」和「真被删的」会是两个不同的集合，那几条跟着消失的
+ * 流向在松手前一刻还是黑的，看起来像是被误删了。
+ *
+ * 级联本身由 `removeShapes` 兜底（那是唯一的删除漏斗），这个函数只负责让
+ * **界面上显示出来的**和实际发生的一致。
+ */
+export function cascadeOf(scene: Scene, ids: Iterable<ID>): ID[] {
+  const doomed = new Set(ids)
+  return scene.shapes.filter((s) => isOrphanFlow(s, doomed)).map((s) => s.id)
 }
 
 export function findShape(scene: Scene, id: ID): Shape | null {
@@ -455,12 +898,23 @@ export function translateShape(shape: Shape, dx: number, dy: number): Shape {
     case 'rect':
     case 'ellipse':
     case 'link':
+    case 'node':
       return { ...shape, a: move(shape.a), b: move(shape.b) }
     case 'pencil':
       return { ...shape, points: shape.points.map(move) }
     // 点符号平移的是插入点，旋转角不动
     case 'symbol':
       return { ...shape, at: move(shape.at) }
+    /*
+     * ⚠️ 流向必须是**显式的恒等分支**，不许让它落进 default。
+     *
+     * 它没有坐标可平移——一端跟着模块走是 `routeFlow` 重新算出来的。
+     * M6.5 记过一个同类的坑：`translateShape` 原来的 default 会去读
+     * `shape.a`，而点符号没有 `a`，于是「拖一下就 TypeError」——那是拖拽主路径，
+     * 不是边缘情况。以后往这里加「没有 a」的种类，第一件要交代的就是它怎么平移。
+     */
+    case 'flow':
+      return shape
     default:
       return assertNever(shape)
   }
@@ -501,9 +955,21 @@ export function handlesOf(shape: Shape, defs: SceneDefs): Point[] {
       return [shape.a, shape.b]
     case 'symbol':
       return symbolAnchors(shape, defs)
+    /*
+     * 模块故意**不在这里给手柄**：它要的是四角缩放，而缩放是另一套交互
+     * （见 `resizeHandlesOf`）。混进「拖端点」里会让两者都变得不可预期。
+     *
+     * 连带后果要记一笔：`collectPointHandles` 因此看不到模块，于是
+     * 「重合的点永远一起走」那条承诺对模块**不成立**——自由图元的端点不会
+     * 跟着模块走，模块也不会被自由图元的端点带走。这是有意的收窄：那套语义
+     * 是给机构简图用的，模块图里没有「铰链」这回事。
+     */
     case 'rect':
     case 'ellipse':
     case 'pencil':
+    case 'node':
+    // 流向的两端是推导出来的，拖它等于拖模块——想改走向就拖模块本身
+    case 'flow':
       return []
     default:
       return assertNever(shape)
@@ -600,6 +1066,8 @@ export function withHandleAt(
     case 'rect':
     case 'ellipse':
     case 'pencil':
+    case 'node':
+    case 'flow':
       return shape
     default:
       return assertNever(shape)
@@ -632,6 +1100,8 @@ export function isGrounded(shape: Shape, defs: SceneDefs): boolean {
     case 'rect':
     case 'ellipse':
     case 'pencil':
+    case 'node':
+    case 'flow':
       return false
     default:
       return assertNever(shape)
@@ -787,6 +1257,22 @@ export function makeSymbol(ref: string, at: Point, rotation = 0): Shape {
 
 export function makeLink(ref: string, a: Point, b: Point): Shape {
   return { id: newId(), kind: 'link', ref, a, b }
+}
+
+/**
+ * 造一个模块。
+ *
+ * 落地时**立刻进文字编辑**（见 BoardCanvas），所以默认文字要是个能一眼看出
+ * 「这是占位、选中它会整段替换」的东西，而不是空字符串——空模块看起来像是
+ * 画错了。
+ */
+export function makeNode(a: Point, b: Point, text: string, fill: string): Shape {
+  return { id: newId(), kind: 'node', a, b, text, fill }
+}
+
+/** 造一条流向。不校验两端——校验在创建它的那个手势里做，那里才知道有没有模块 */
+export function makeFlow(from: ID, to: ID, stroke: string): Shape {
+  return { id: newId(), kind: 'flow', from, to, stroke }
 }
 
 /**

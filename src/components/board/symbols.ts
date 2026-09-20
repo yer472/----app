@@ -43,16 +43,43 @@ import type { Point } from './scene'
  * `w` 是线宽覆盖，缺省用 `STROKE_WIDTH`（3）。标准要求「表示轴、杆符号的
  * 图线应用两倍粗实线」，所以粗线是**零件级**的属性而不是图形级的。
  *
- * 只用描边、不用填充：选中高亮层是无条件 `fill: none` 的叠加，实心零件在
- * 高亮层里会只剩轮廓，看起来和「被选中」对不上；描边也和现有那套「白纸黑线」
- * 的制图惯例一致。
+ * `fill` 只有模块图的两种图形用得上（模块的底色、箭头的实心三角）。**缺省不填**，
+ * 因为机构符号那套惯例是白纸黑线、只用描边。
+ *
+ * ⚠️ 带 `fill` 的零件在**选中高亮层**里必须被显式压回 `fill: none`（调用方传
+ * `PartStyle.fill`）：高亮层是把图形重画一遍加粗描边，不压的话那个不透明的
+ * 底色会把模块里的文字整个盖住。这是「加了填充」之后唯一需要每处都记得的事。
  */
 export type Part =
   | { kind: 'line'; a: Point; b: Point; w?: number }
   | { kind: 'polyline'; points: Point[]; w?: number }
-  | { kind: 'rect'; a: Point; b: Point; w?: number }
-  | { kind: 'ellipse'; a: Point; b: Point; w?: number }
-  | { kind: 'text'; at: Point; text: string; size: number }
+  | { kind: 'polygon'; points: Point[]; w?: number; fill?: string }
+  | { kind: 'rect'; a: Point; b: Point; w?: number; fill?: string }
+  | { kind: 'ellipse'; a: Point; b: Point; w?: number; fill?: string }
+  | {
+      kind: 'text'
+      at: Point
+      text: string
+      size: number
+      /**
+       * 水平对齐，缺省 `start`（SVG 的默认值）。
+       *
+       * 模块的标签要 `middle`：它在框里居中，而框的宽度随时会被拉。若靠算
+       * 文字宽度去凑起点，改一次字号就得重算一次，且导出和画布会用不同的
+       * 字体量出不同的宽度（见 render.tsx 的 `FIGURE_FONT_FAMILY`）。
+       */
+      anchor?: 'start' | 'middle'
+      /** 文字颜色，缺省墨色。模块底色深的时候要换成白的 */
+      fill?: string
+    }
+
+/**
+ * 零件的种类。
+ *
+ * 单独立一个类型是为了让「按种类穷尽」的写法能成立——`serialize.ts` 的
+ * `PART_VALIDATORS` 就是一整张 `Record<PartKind, …>`，漏一种零件是编译错误。
+ */
+export type PartKind = Part['kind']
 
 /** 面板里的分组。和快捷键目录一样，另给一张表管顺序和标题 */
 export type SymbolGroup = 'joint' | 'member' | 'drive' | 'driven' | 'source'
@@ -396,12 +423,10 @@ export function hitsPart(part: Part, p: Point, tolerance: number): boolean {
     case 'line':
       return distancePointToSegment(p, part.a, part.b) <= slack
     case 'polyline':
-      return part.points.some((point, i) => {
-        const next = part.points[i + 1]
-        return next
-          ? distancePointToSegment(p, point, next) <= slack
-          : Math.hypot(p.x - point.x, p.y - point.y) <= slack
-      })
+      return distanceToPath(part.points, false, p) <= slack
+    // 多边形按**闭合**算：箭头那个实心三角的最后一条边也要能点中
+    case 'polygon':
+      return distanceToPath(part.points, true, p) <= slack
     case 'rect': {
       const r = boxOf(part.a, part.b)
       return (
@@ -424,15 +449,14 @@ export function hitsPart(part: Part, p: Point, tolerance: number): boolean {
       // 文字的准确外框要问浏览器（量字体），这里用「字号」估一个够用的矩形。
       // 命中判定不需要精确到像素，偏差几个单位没人感觉得到
       const width = part.text.length * part.size * 0.62
+      const left = part.anchor === 'middle' ? part.at.x - width / 2 : part.at.x
       return (
-        p.x >= part.at.x - slack &&
-        p.x <= part.at.x + width + slack &&
+        p.x >= left - slack &&
+        p.x <= left + width + slack &&
         p.y >= part.at.y - part.size - slack &&
         p.y <= part.at.y + slack
       )
     }
-    default:
-      return false
   }
 }
 
@@ -442,6 +466,32 @@ export function hitsParts(
   tolerance: number,
 ): boolean {
   return parts.some((part) => hitsPart(part, p, tolerance))
+}
+
+/**
+ * 一条折线（或多边形）上离 `p` 最近的距离。
+ *
+ * `closed` 为真时把「最后一个点回到第一个点」那条边也算上。只有一个点的
+ * 折线按点算——那种笔画画不出线，但仍然应该点得中。
+ */
+function distanceToPath(
+  points: readonly Point[],
+  closed: boolean,
+  p: Point,
+): number {
+  let best = Infinity
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i]
+    if (!current) continue
+    const next = points[i + 1] ?? (closed ? points[0] : undefined)
+    best = Math.min(
+      best,
+      next
+        ? distancePointToSegment(p, current, next)
+        : Math.hypot(p.x - current.x, p.y - current.y),
+    )
+  }
+  return best
 }
 
 // 这两个是 scene.ts 里同名函数的副本，**故意不 import**：scene.ts 已经
@@ -482,34 +532,13 @@ export function partsBounds(
   let maxX = -Infinity
   let maxY = -Infinity
 
-  const include = (point: Point) => {
-    minX = Math.min(minX, point.x)
-    minY = Math.min(minY, point.y)
-    maxX = Math.max(maxX, point.x)
-    maxY = Math.max(maxY, point.y)
-  }
-
   for (const part of parts) {
-    switch (part.kind) {
-      case 'line':
-        include(part.a)
-        include(part.b)
-        break
-      case 'polyline':
-        part.points.forEach(include)
-        break
-      case 'rect':
-      case 'ellipse':
-        include(part.a)
-        include(part.b)
-        break
-      case 'text':
-        include({ x: part.at.x, y: part.at.y - part.size })
-        include({ x: part.at.x + part.text.length * part.size * 0.62, y: part.at.y })
-        break
-      default:
-        break
-    }
+    const box = partBounds(part)
+    if (!box) continue
+    minX = Math.min(minX, box.minX)
+    minY = Math.min(minY, box.minY)
+    maxX = Math.max(maxX, box.maxX)
+    maxY = Math.max(maxY, box.maxY)
   }
 
   if (!Number.isFinite(minX)) return { x: -padding, y: -padding, w: padding * 2, h: padding * 2 }
@@ -518,5 +547,67 @@ export function partsBounds(
     y: minY - padding,
     w: maxX - minX + padding * 2,
     h: maxY - minY + padding * 2,
+  }
+}
+
+interface Box {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
+/**
+ * 一个零件占的地方。什么都没有（空的折线）时返回 null。
+ *
+ * **每个分支都必须 return，且这里不写 `default`。** `tsconfig` 开了
+ * `noImplicitReturns`：往 `Part` 联合里加一种零件而漏了这个 switch，
+ * 编译器会直接报「不是所有代码路径都有返回值」。
+ *
+ * 原来这段是内联在 `partsBounds` 的循环里、以一个 `default: break` 收尾的，
+ * 而 `break` 之后函数照常在循环外 return——漏一种零件的表现是
+ * 「面板缩略图把它裁掉了」，不报任何错。`hitsPart` 同理（它原来也有一个
+ * `default: return false`，后果是那个零件在图上点不中）。
+ *
+ * 这两个地方**故意不用 `assertNever`**：它在 scene.ts 里，而这个文件引
+ * scene.ts 的值会构成真正的运行期循环（见下面 `distancePointToSegment`
+ * 的注释）。靠 `noImplicitReturns` 就够，不需要再引一个值进来。
+ */
+function partBounds(part: Part): Box | null {
+  switch (part.kind) {
+    case 'line':
+    case 'rect':
+    case 'ellipse': {
+      const r = boxOf(part.a, part.b)
+      return { minX: r.minX, minY: r.minY, maxX: r.maxX, maxY: r.maxY }
+    }
+    case 'polyline':
+    case 'polygon': {
+      if (part.points.length === 0) return null
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const point of part.points) {
+        minX = Math.min(minX, point.x)
+        minY = Math.min(minY, point.y)
+        maxX = Math.max(maxX, point.x)
+        maxY = Math.max(maxY, point.y)
+      }
+      return { minX, minY, maxX, maxY }
+    }
+    case 'text': {
+      // 文字外框和 `hitsPart` 用同一套估算，两处必须一致：不一样的话会
+      // 出现「缩略图裁掉了，但图上点得中」这种自相矛盾的表现。
+      // 居中的文字 `at.x` 是中心，估算宽度要往两边各摊一半
+      const width = part.text.length * part.size * 0.62
+      const left = part.anchor === 'middle' ? part.at.x - width / 2 : part.at.x
+      return {
+        minX: left,
+        minY: part.at.y - part.size,
+        maxX: left + width,
+        maxY: part.at.y,
+      }
+    }
   }
 }

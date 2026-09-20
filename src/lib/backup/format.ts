@@ -22,6 +22,7 @@
 import { sanitizeFileName, uniqueFileName } from '@/lib/filename'
 import { hashString } from '@/lib/hash'
 import { formatDateTime } from '@/lib/time'
+import { SYMBOL_SHAPE_KINDS, type ShapeKind } from '@/types/scene'
 import type {
   Attachment,
   AttachmentType,
@@ -535,14 +536,22 @@ function isCustomSymbol(value: unknown): value is CustomSymbol {
   )
 }
 
-const SHAPE_KINDS = new Set(['line', 'rect', 'ellipse', 'pencil'])
-
-/** 自定义符号里**只允许**普通图元：放符号进去会形成递归 */
+/**
+ * 自定义符号里**只允许**普通图元：放符号进去会形成递归。
+ *
+ * 名单在 `types/scene.ts` 里，和 `SymbolRepository` 存之前过滤用的是同一份
+ * ——这两处必须一致，否则「画完保存了、导出再导入回来符号就缺了一块」。
+ *
+ * 这里是备**份文件**的校验，数据可能来自别的版本，所以查不到就判不合法：
+ * 宁可判定这个符号读不回来，也不要让一个来路不明的图元进到渲染层。
+ */
 function isSceneShape(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
   const shape = value as Record<string, unknown>
   if (typeof shape.id !== 'string') return false
-  if (typeof shape.kind !== 'string' || !SHAPE_KINDS.has(shape.kind)) return false
+  if (typeof shape.kind !== 'string') return false
+  const allowed: boolean | undefined = SYMBOL_SHAPE_KINDS[shape.kind as ShapeKind]
+  if (!allowed) return false
   if (shape.kind === 'pencil') return Array.isArray(shape.points)
   return isScenePoint(shape.a) && isScenePoint(shape.b)
 }

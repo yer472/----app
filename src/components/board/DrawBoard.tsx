@@ -10,13 +10,27 @@ import { useOverlay } from '@/lib/shortcuts/overlay'
 import { AttachmentRepository, SymbolRepository } from '@/repository'
 import type { Attachment, CustomSymbol, ID } from '@/types/models'
 import { BoardCanvas } from './BoardCanvas'
-import { createScene, removeShapes, type Scene } from './scene'
-import { defOfCustomSymbol } from './render'
+import {
+  assertNever,
+  createScene,
+  findShape,
+  removeShapes,
+  replaceShape,
+  type Scene,
+} from './scene'
+import { FLOW_STROKE_COLORS, NODE_FILL_COLORS, defOfCustomSymbol } from './render'
 import { readSceneFromBlob, sceneToSvgBlob } from './serialize'
 import { POINT_SYMBOLS, type PointSymbolDef } from './symbols'
 import { SymbolEditor, type SymbolDraft } from './SymbolEditor'
 import { SymbolPanel } from './SymbolPanel'
-import { HOTKEY_TO_TOOL, TOOLS, TOOL_ICONS, type Tool } from './tools'
+import {
+  HOTKEY_TO_TOOL,
+  TOOL_ICONS,
+  TOOL_MODE,
+  toolsForMode,
+  type Tool,
+  type ToolMode,
+} from './tools'
 import { useSceneHistory } from './useHistory'
 
 interface DrawBoardProps {
@@ -31,6 +45,40 @@ interface DrawBoardProps {
   onInsert: (assetUrl: string, caption: string) => boolean
   /** 有没有未保存的改动。外面据此接入关页提示 */
   onDirtyChange: (dirty: boolean) => void
+}
+
+/**
+ * 页脚那行提示。按工具给，换工具就换一句。
+ *
+ * 写成函数而不是嵌套三元：原来那条链已经有四层，再加「模块」「流向」两层就
+ * 没法读了，而且**新的工具会静默落进最后那个兜底分支**（给的是「按住左键拖动
+ * 绘制」，对模块和流向都是错的说明）。这里以 `assertNever` 收尾，加工具时
+ * 编译器会直接指出这里也要交代。
+ */
+function hintFor(tool: Tool, selectedId: ID | null): string {
+  switch (tool.kind) {
+    case 'select':
+      return selectedId
+        ? '拖动图形本身是平移 · Delete 删除 · 双击模块可以改文字'
+        : '点选图元可拖动，Delete 删除 · 双击模块改文字 · Ctrl+Z 撤销'
+    case 'eraser':
+      return '点一下或按住拖动，划过的图元整块擦掉 · 松手才真删，撤销一次全回来'
+    case 'symbol':
+      return '在图上点一下放下（带杆的符号按住拖动）· 放下后拖蓝色手柄改方向 · Esc 取消'
+    case 'node':
+      return '点一下放下一个模块（拖出来可以自定义大小）· 放下后直接打字，Enter 确认'
+    case 'flow':
+      return '从一个模块按住拖到另一个模块，松手就建立流向 · 选中后按 Delete 删除'
+    case 'line':
+    case 'rect':
+    case 'ellipse':
+    case 'pencil':
+      return '按住左键拖动绘制 · 端点会自动吸住 · 按住 Shift 约束角度 · 换工具按快捷键'
+    default:
+      // 走不到这里：上面把每一种工具都交代过了。用 `never` 收尾是为了
+      // 「加了工具却忘了给它一句提示」变成编译错误
+      return assertNever(tool)
+  }
 }
 
 /**
@@ -52,6 +100,11 @@ export function DrawBoard({
   onDirtyChange,
 }: DrawBoardProps) {
   const [tool, setTool] = useState<Tool>({ kind: 'line' })
+  /**
+   * 自由图形 / 模块图。**只决定工具栏显示哪几个按钮**，不影响场景能装什么
+   * ——一张图上可以既有模块又有自由线条（见 tools.ts 的 `TOOL_MODE`）。
+   */
+  const [mode, setMode] = useState<ToolMode>('free')
   const [snap, setSnap] = useState(true)
   const [selectedId, setSelectedId] = useState<ID | null>(null)
   const [caption, setCaption] = useState('')
@@ -143,7 +196,14 @@ export function DrawBoard({
     void readSceneFromBlob(attachment.blob).then((loaded) => {
       if (cancelled) return
       if (loaded) {
-        reset(loaded)
+        reset(loaded.scene)
+        // 修掉过东西必须说出来。「悄悄少了一条箭头」是这个项目最不该有的表现，
+        // 用户只会以为自己的图坏了、而且找不到原因
+        if (loaded.droppedFlows > 0) {
+          setNotice(
+            `有 ${loaded.droppedFlows} 条流向的端点找不到了，已移除。`,
+          )
+        }
       } else {
         setSceneUnavailable(true)
         setError('这张图读不出来了。它可能是更早的版本存的。')
@@ -170,6 +230,37 @@ export function DrawBoard({
     commit(removeShapes(scene, [selectedId]))
     setSelectedId(null)
   }, [commit, scene, selectedId])
+
+  /**
+   * 配色板作用的对象：选中的模块（改填充色）或流向（改线条色）。
+   *
+   * 选中别的图形时是 null——色板照样画出来但置灰。**不把整条色板藏起来**：
+   * 藏起来的话工具栏会随选中态伸缩，点一下图元所有按钮都平移一格，
+   * 那是「点错了」的高发来源。
+   */
+  const colorTarget = useMemo(() => {
+    if (!selectedId) return null
+    const shape = findShape(scene, selectedId)
+    return shape?.kind === 'node' || shape?.kind === 'flow' ? shape : null
+  }, [scene, selectedId])
+
+  const paletteColors =
+    colorTarget?.kind === 'flow' ? FLOW_STROKE_COLORS : NODE_FILL_COLORS
+  const currentColor =
+    colorTarget?.kind === 'node'
+      ? colorTarget.fill
+      : colorTarget?.kind === 'flow'
+        ? colorTarget.stroke
+        : null
+
+  const applyColor = (color: string) => {
+    if (!colorTarget) return
+    const next =
+      colorTarget.kind === 'node'
+        ? { ...colorTarget, fill: color }
+        : { ...colorTarget, stroke: color }
+    commit(replaceShape(scene, colorTarget.id, next))
+  }
 
   /**
    * 保存并收尾。
@@ -326,6 +417,15 @@ export function DrawBoard({
     if (nextTool) {
       event.preventDefault()
       setTool({ kind: nextTool })
+      /*
+       * 工具不在当前模式里时，把模式**跟着切过去**。
+       *
+       * 不切的话，在「自由图形」下按 N 确实换了工具，但工具栏上没有任何一个
+       * 按钮是按下状态——用户的第一反应是「这个快捷键没生效」，而实际上他接着
+       * 点画布就会放下一个模块。工具和它的按钮必须同时出现。
+       */
+      const owner = TOOL_MODE[nextTool]
+      if (owner !== 'both') setMode(owner)
       // 换工具就取消选中，否则选中框会一直挂在图上，
       // 让人以为新工具会画到那个图上面去
       setSelectedId(null)
@@ -347,7 +447,41 @@ export function DrawBoard({
           {attachment ? '编辑图形' : '新建图形'}
         </span>
 
-        {TOOLS.map((spec) => (
+        {/* 模式只是工具栏的分组，不改变场景能装什么 */}
+        <div
+          className="flex items-center rounded-md bg-neutral-100 p-0.5 dark:bg-neutral-800"
+          data-board-modes
+        >
+          {(
+            [
+              { id: 'free', label: '自由图形' },
+              { id: 'block', label: '模块图' },
+            ] as const
+          ).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => {
+                setMode(option.id)
+                // 换模式就回到选择：上膛的工具可能不属于新模式，
+                // 留着的话工具栏上会没有它是「按下」状态的按钮
+                setTool({ kind: 'select' })
+                setSelectedId(null)
+              }}
+              aria-pressed={mode === option.id}
+              className={cn(
+                'h-7 rounded px-2.5 text-sm transition-colors',
+                mode === option.id
+                  ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-700 dark:text-neutral-100'
+                  : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        {toolsForMode(mode).map((spec) => (
           <button
             key={spec.kind}
             type="button"
@@ -368,6 +502,44 @@ export function DrawBoard({
             {spec.label}
           </button>
         ))}
+
+        <span className="mx-1 h-5 w-px bg-neutral-200 dark:bg-neutral-700" />
+
+        {/*
+          配色板。模块改的是填充色，流向改的是线条色——**同一个色板**，
+          因为「挑个颜色」对用户是同一件事。流向那一份把白色换成了墨色：
+          白线画在白图纸上等于没有。两者长度相同，所以切换选中时按钮不会跳动。
+        */}
+        {mode === 'block' ? (
+          <div className="flex items-center gap-1" data-board-palette>
+            {paletteColors.map((color) => (
+              <button
+                key={color}
+                type="button"
+                onClick={() => applyColor(color)}
+                disabled={!colorTarget}
+                data-color={color}
+                title={colorTarget ? `改成这个颜色` : '先选一个模块或流向'}
+                aria-label={`颜色 ${color}`}
+                aria-pressed={currentColor === color}
+                className={cn(
+                  'h-6 w-6 rounded border transition-transform',
+                  currentColor === color
+                    ? 'border-blue-600 ring-2 ring-blue-500/40'
+                    : 'border-neutral-300 dark:border-neutral-600',
+                  colorTarget ? 'hover:scale-110' : 'opacity-40',
+                )}
+                // 色块自己就是色值，不能用 Tailwind 类写死
+                style={{ backgroundColor: color }}
+              >
+                {/* 白底在浅色界面上没有边界感，用一个内部描边把它圈出来 */}
+                {color === '#ffffff' ? (
+                  <span className="block h-full w-full rounded-sm ring-1 ring-inset ring-neutral-300" />
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
 
         <span className="mx-1 h-5 w-px bg-neutral-200 dark:bg-neutral-700" />
 
@@ -497,17 +669,7 @@ export function DrawBoard({
       </div>
 
       <footer className="flex shrink-0 items-center gap-3 border-t border-neutral-200 bg-white px-4 py-1.5 text-xs text-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-500">
-        <span>
-          {tool.kind === 'select'
-            ? selectedId
-              ? '拖动图形本身是平移 · 拖端点手柄只动那一个点 · Delete 删除'
-              : '点选图元可拖动，Delete 删除 · Ctrl+Z 撤销'
-            : tool.kind === 'eraser'
-              ? '点一下或按住拖动，划过的图元整块擦掉 · 松手才真删，撤销一次全回来'
-              : tool.kind === 'symbol'
-                ? '在图上点一下放下（带杆的符号按住拖动）· 放下后拖蓝色手柄改方向 · Esc 取消'
-                : '按住左键拖动绘制 · 端点会自动吸住 · 按住 Shift 约束角度 · 换工具按快捷键'}
-        </span>
+        <span data-board-hint>{hintFor(tool, selectedId)}</span>
         {notice ? (
           <span className="ml-auto text-amber-600 dark:text-amber-400">{notice}</span>
         ) : measure ? (
