@@ -66,6 +66,9 @@ const KIND_VERSION: Record<ShapeKind, number> = {
   pencil: 1,
   symbol: 2,
   link: 2,
+  // 模块图整套一起上，所以两种图形共用一个版本号
+  node: 3,
+  flow: 3,
 }
 
 /** 本版本能读到的最高版本号。写入时不一定用这个值，见上面 */
@@ -241,16 +244,8 @@ function isScene(value: unknown): value is Scene {
    * 注意**不要**在这一步去查内置符号库（symbols.ts）：判定的依据只有
    * 「场景里有没有这份定义」。内联是刻意的——标准库以后改了图形，老图
    * 也不该跟着变形；如果这里允许回退到内置库，那条承诺就没了。
-   *
-   * id 只收字符串：这时候场景还没验完，`s.shapes` 里可能是任何东西。
    */
-  const ids = new Set<string>()
-  for (const shape of s.shapes) {
-    const id = (shape as { id?: unknown }).id
-    if (typeof id === 'string') ids.add(id)
-  }
-
-  const ctx: ShapeCheckContext = { defs: s.defs ?? {}, ids }
+  const ctx: ShapeCheckContext = { defs: s.defs ?? {} }
   return s.shapes.every((shape) => isShape(shape, ctx))
 }
 
@@ -263,14 +258,30 @@ function isPoint(value: unknown): value is Point {
 /**
  * 校验一条图形时能看到的**场景级**信息。
  *
- * 有些图形光看自己不够：点符号要知道它引用的定义在不在场景里，流向要知道
- * 它两端的模块还在不在。这类规则也放进下面那张表（见 isScene 的注释）。
+ * 目前只有点符号用得上它（要知道引用的定义在不在场景里）。流向**故意不用**
+ * ——它的引用完整性不在这里判，而是交给 `repairScene` 事后修，理由见那个函数。
  */
 interface ShapeCheckContext {
   /** 场景里内联的点符号定义 */
   defs: Record<string, PointSymbolDef>
-  /** 场景里出现过的图形 id */
-  ids: ReadonlySet<string>
+}
+
+/** 颜色只认字面十六进制色值，见 `isOptionalColor` */
+const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/
+
+/**
+ * 可选的颜色字段。
+ *
+ * 校验它不是「为了好看」：这个字符串会原样进 `setAttribute('fill', …)`，
+ * 而数据来自可以手工编辑的 SVG 文件。认不出来的值不是「画错颜色」，
+ * 是让整张图渲染不出来。
+ */
+function isOptionalColor(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && HEX_COLOR.test(value))
+}
+
+function isArrayOfPoints(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isPoint)
 }
 
 /** 一条图形自己的字段校验器 */
@@ -290,7 +301,7 @@ const SHAPE_VALIDATORS: { [K in ShapeKind]: ShapeValidator } = {
   line: (s) => isPoint(s.a) && isPoint(s.b),
   rect: (s) => isPoint(s.a) && isPoint(s.b),
   ellipse: (s) => isPoint(s.a) && isPoint(s.b),
-  pencil: (s) => Array.isArray(s.points) && s.points.every(isPoint),
+  pencil: (s) => isArrayOfPoints(s.points),
   symbol: (s, ctx) =>
     typeof s.ref === 'string' &&
     s.ref.length > 0 &&
@@ -299,6 +310,28 @@ const SHAPE_VALIDATORS: { [K in ShapeKind]: ShapeValidator } = {
     Number.isFinite(s.rotation) &&
     ctx.defs[s.ref] !== undefined,
   link: (s) => typeof s.ref === 'string' && s.ref.length > 0 && isPoint(s.a) && isPoint(s.b),
+  node: (s) =>
+    isPoint(s.a) &&
+    isPoint(s.b) &&
+    typeof s.text === 'string' &&
+    typeof s.fill === 'string' &&
+    HEX_COLOR.test(s.fill),
+  /*
+   * 流向**只做形状校验，不查两端在不在**。
+   *
+   * 查的话，一条端点丢了的流向会让 `isScene` 判假 → 整张图「读不出来了」+
+   * 保存被禁用，而用户丢掉的是**整张图**（模块、文字、别的流向全在里面），
+   * 只能手工去改导出的 SVG 才能救回来。那是 M6.5 记过的那类故障，不能再开一个口子。
+   *
+   * 引用完整性交给 `repairScene`：丢掉那一条、其余照常打开、并且告诉用户。
+   * 两种坏法的性质本来就不一样——符号的定义丢了是那个图形**画不出来**，
+   * 图确实是坏的；流向的端点丢了只是**那一条箭头**没了。
+   */
+  flow: (s) =>
+    typeof s.from === 'string' &&
+    typeof s.to === 'string' &&
+    typeof s.stroke === 'string' &&
+    HEX_COLOR.test(s.stroke),
 }
 
 const VALIDATOR_BY_KIND = new Map<string, ShapeValidator>(
@@ -328,11 +361,16 @@ const PART_VALIDATORS: {
   [K in PartKind]: (p: Record<string, unknown>) => boolean
 } = {
   line: (p) => isPoint(p.a) && isPoint(p.b),
-  polyline: (p) => Array.isArray(p.points) && p.points.every(isPoint),
-  rect: (p) => isPoint(p.a) && isPoint(p.b),
-  ellipse: (p) => isPoint(p.a) && isPoint(p.b),
+  polyline: (p) => isArrayOfPoints(p.points),
+  polygon: (p) => isArrayOfPoints(p.points) && isOptionalColor(p.fill),
+  rect: (p) => isPoint(p.a) && isPoint(p.b) && isOptionalColor(p.fill),
+  ellipse: (p) => isPoint(p.a) && isPoint(p.b) && isOptionalColor(p.fill),
   text: (p) =>
-    isPoint(p.at) && typeof p.text === 'string' && typeof p.size === 'number',
+    isPoint(p.at) &&
+    typeof p.text === 'string' &&
+    typeof p.size === 'number' &&
+    isOptionalColor(p.fill) &&
+    (p.anchor === undefined || p.anchor === 'start' || p.anchor === 'middle'),
 }
 
 function isPart(value: unknown): boolean {
@@ -378,10 +416,51 @@ function isDefs(value: unknown): value is Record<string, PointSymbolDef> {
   )
 }
 
+/**
+ * 打开一张图之后**修一次**：丢掉端点已经不在的流向，返回丢掉的条数。
+ *
+ * 为什么不像点符号那样「定义丢了就整张图拒开」——两种坏法的代价差得很远：
+ *
+ * - 符号的定义丢了，那个图形**画不出来**，图确实是坏的；
+ * - 一条流向的端点丢了，只是**那一条箭头**没了，模块、文字、别的流向全都在。
+ *
+ * 拒开的代价是整张图打不开、连保存都被禁用（见 DrawBoard 的 `sceneUnavailable`），
+ * 只能手工改导出的 SVG 才能救回来——那是 M6.5 记过的那类故障。所以这里的规矩是
+ * **构造上保证它不出现**（`removeShapes` 的级联 + 创建流向时拒绝空端点/自环），
+ * 真出现了就修掉、并让用户看见。
+ *
+ * 顺带也挡掉自环：`from === to` 时几何会退化成一条没有方向的路径。
+ */
+export function repairScene(scene: Scene): {
+  scene: Scene
+  droppedFlows: number
+} {
+  const nodes = new Set<string>()
+  for (const shape of scene.shapes) {
+    if (shape.kind === 'node') nodes.add(shape.id)
+  }
+
+  const kept = scene.shapes.filter(
+    (shape) =>
+      shape.kind !== 'flow' ||
+      (shape.from !== shape.to && nodes.has(shape.from) && nodes.has(shape.to)),
+  )
+  if (kept.length === scene.shapes.length) return { scene, droppedFlows: 0 }
+
+  return {
+    scene: { ...scene, shapes: kept },
+    // 差的这批一定全是流向：上面的 filter 只可能删掉它们
+    droppedFlows: scene.shapes.length - kept.length,
+  }
+}
+
 /** 从附件里读回场景。附件内容不是合法 SVG 时返回 null */
-export async function readSceneFromBlob(blob: Blob): Promise<Scene | null> {
+export async function readSceneFromBlob(
+  blob: Blob,
+): Promise<{ scene: Scene; droppedFlows: number } | null> {
   try {
-    return parseSceneFromSvg(await blob.text())
+    const parsed = parseSceneFromSvg(await blob.text())
+    return parsed ? repairScene(parsed) : null
   } catch {
     return null
   }

@@ -10,7 +10,15 @@
  * 就自动多一个工具」。现在多一种图形而忘了加工具是**编译错误**——
  * `BoardCanvas` 里的 `draftFor` 用 `assertNever` 收尾。
  */
-export type ToolKind = 'select' | 'line' | 'rect' | 'ellipse' | 'pencil' | 'eraser'
+export type ToolKind =
+  | 'select'
+  | 'line'
+  | 'rect'
+  | 'ellipse'
+  | 'pencil'
+  | 'eraser'
+  | 'node'
+  | 'flow'
 
 /**
  * 当前上膛的工具。
@@ -55,7 +63,46 @@ export const TOOLS: Record<ToolKind, ToolSpec> = {
   rect: { kind: 'rect', label: '矩形', hotkey: 'r' },
   ellipse: { kind: 'ellipse', label: '椭圆', hotkey: 'o' },
   pencil: { kind: 'pencil', label: '手绘', hotkey: 'p' },
+  node: { kind: 'node', label: '模块', hotkey: 'n' },
+  flow: { kind: 'flow', label: '流向', hotkey: 'f' },
   eraser: { kind: 'eraser', label: '橡皮', hotkey: 'e' },
+}
+
+/**
+ * 画板的两种模式。
+ *
+ * ⚠️ **模式只决定工具栏显示哪几个按钮，不改变场景能装什么。** 一张图上
+ * 可以既有模块又有自由线条——模块图里想补一条注释线、拉一个箭头标注，都是
+ * 常事，为此逼用户切换模式或者分成两张图反而是添乱。所以「模式」纯粹是
+ * 界面层的分组，不参与数据模型，也不影响场景格式版本。
+ */
+export type ToolMode = 'free' | 'block'
+
+/**
+ * 每种工具归哪个模式管。`both` 是两种模式下都出现。
+ *
+ * 写成一整张 `Record<ToolKind, …>` 而不是两个数组：加一种工具必须在这里表态，
+ * 否则它会**在两种模式下都不出现**——类型系统知道它、`TOOL_ICONS` 逼你给它起名，
+ * 但用户永远看不到它，而没有任何一处报错。
+ */
+export const TOOL_MODE: Record<ToolKind, ToolMode | 'both'> = {
+  select: 'both',
+  line: 'free',
+  rect: 'free',
+  ellipse: 'free',
+  pencil: 'free',
+  // 橡皮对模块也管用，所以两种模式都给
+  eraser: 'both',
+  node: 'block',
+  flow: 'block',
+}
+
+/** 某个模式下该显示哪些工具，按 `TOOLS` 的声明顺序 */
+export function toolsForMode(mode: ToolMode): readonly ToolSpec[] {
+  return TOOL_LIST.filter((spec) => {
+    const owner = TOOL_MODE[spec.kind]
+    return owner === 'both' || owner === mode
+  })
 }
 
 /**
@@ -72,6 +119,9 @@ export const TOOL_ICONS: Record<ToolKind, string> = {
   rect: '▭',
   ellipse: '◯',
   pencil: '✎',
+  // 和「矩形」的 ▭ 要能一眼分开：模块是**实心的**，带底色
+  node: '▣',
+  flow: '→',
   eraser: '⌫',
 }
 

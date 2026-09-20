@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useEffect,
   useId,
   useMemo,
   useRef,
@@ -17,14 +18,30 @@ import {
   constrainToAngle,
   constrainToSquare,
   contextOf,
+  alignSnap,
+  cascadeOf,
+  collectAlignCandidates,
   hitTest,
   hitTestAll,
+  hitTestResizeHandle,
   makeEllipse,
+  makeFlow,
   makeLine,
+  makeNode,
   makePencil,
   makeRect,
   measure,
+  nodeFontSize,
+  nodeRect,
   normalizeRect,
+  replaceShape,
+  resizeHandlesOf,
+  translateShape,
+  withDefaultNodeSize,
+  withResizedCorner,
+  NODE_DEFAULT_TEXT,
+  NODE_PADDING_X,
+  type AlignCandidate,
   removeShapes,
   snapToGrid,
   snapToPoints,
@@ -42,12 +59,17 @@ import {
   type Scene,
   type SceneContext,
   type SceneDefs,
+  type SceneNode,
   type Shape,
 } from './scene'
 import {
+  FIGURE_FONT_FAMILY,
   INK_COLOR,
+  NODE_FILL_COLORS,
   STROKE_WIDTH,
+  fitNodeToText,
   partToReact,
+  pickLabelInk,
   shapeToParts,
   type PartStyle,
 } from './render'
@@ -74,6 +96,18 @@ const ERASE_COLOR = '#dc2626'
 /** 端点 / 旋转手柄 */
 const HANDLE_COLOR = '#2563eb'
 const HANDLE_RADIUS = 5
+/** 模块的缩放手柄画成方块，半边长比端点手柄略大一点，好点中 */
+const RESIZE_HANDLE_HALF = 6
+/** 对齐辅助线。用洋红而不是蓝/绿：那两个已经被选中态和吸附提示占了 */
+const GUIDE_COLOR = '#db2777'
+
+/**
+ * 「点一下」和「拖一下」的分界（图纸单位）。
+ *
+ * 不设阈值的话，手抖一两个像素就被当成拖动，于是「单击已选中的模块进编辑」
+ * 会先把模块挪走一点；也不能太大，否则想把模块挪一点点时会先走过一段死区。
+ */
+const MOVE_THRESHOLD = 3
 const GRID_COLOR = '#e5e7eb'
 /** 图纸底色。和 serialize.ts 里导出的那张纸保持一致——所见即所得 */
 const SHEET_COLOR = '#ffffff'
@@ -100,7 +134,28 @@ type Gesture =
        */
       targets: readonly Point[]
     }
-  | { kind: 'move'; id: ID; start: Point; origin: Shape; base: Scene }
+  | {
+      kind: 'move'
+      id: ID
+      start: Point
+      /** 按下时的那个形状。位移永远相对它算，不在上一帧结果上累加 */
+      origin: Shape
+      /**
+       * 按下的那一刻，这个形状**已经**是选中的吗。
+       *
+       * 用来实现「单击已选中的模块进入文字编辑」：只有它已经是选中的，
+       * 一次没移动的点击才算「想改文字」，否则那只是「选中它」。
+       */
+      wasSelected: boolean
+      /**
+       * 对齐辅助线的候选，**按下时算一次**。
+       *
+       * 和 `draw` 的 `targets` 同一个理由：每帧重算会把正在拖的这个也算进去，
+       * 于是它吸到自己身上、一动都动不了。
+       */
+      candidates: readonly AlignCandidate[]
+      base: Scene
+    }
   | {
       /** 拖一个端点手柄（或点符号的锚点） */
       kind: 'handle'
@@ -109,6 +164,28 @@ type Gesture =
       /** 按下时那个手柄在哪。联动是相对它算的，不跟着手势漂 */
       anchor: Point
       base: Scene
+    }
+  | {
+      /** 拖模块的四角手柄改尺寸 */
+      kind: 'resize'
+      id: ID
+      corner: number
+      base: Scene
+    }
+  | {
+      /**
+       * 从模块拖向模块，建一条流向。
+       *
+       * 它**不走 `draw` 那条路**：流向的合法性取决于「两端是两个不同的、
+       * 存在的模块」，而那是按下和松手两个时刻才知道的信息，塞进一个草稿
+       * 图形里表达不出来。
+       */
+      kind: 'flow'
+      from: ID
+      /** 当前指针位置，用来画那条跟随的虚线 */
+      to: Point
+      /** 指针底下现在是不是一个**合法的**目标模块。松手时用它 */
+      target: ID | null
     }
   | {
       /** 拖点符号的旋转手柄 */
@@ -162,8 +239,16 @@ interface BoardCanvasProps {
   overlay?: ReactNode
 }
 
-/** 屏幕坐标 → 图纸坐标 */
-function toScenePoint(svg: SVGSVGElement, event: ReactPointerEvent): Point {
+/**
+ * 屏幕坐标 → 图纸坐标。
+ *
+ * 只要求 `clientX/clientY`，不收整个事件：指针事件和鼠标事件都要走它
+ * （双击进文字编辑走的是 `onDoubleClick`，那是鼠标事件）。
+ */
+function toScenePoint(
+  svg: SVGSVGElement,
+  event: { clientX: number; clientY: number },
+): Point {
   const ctm = svg.getScreenCTM()
   if (!ctm) return { x: 0, y: 0 }
   const p = new DOMPoint(event.clientX, event.clientY).matrixTransform(
@@ -193,6 +278,17 @@ function isDegenerate(shape: Shape): boolean {
     // 点符号点一下就成形，没有「拖得太短」这回事
     case 'symbol':
       return false
+    /*
+     * 模块也**永远不丢弃**：单击不拖就该造出一个模块。丢弃的表现是
+     * 「点了一下什么都没发生」，而这里正是用户最期待有反应的地方。
+     * 零尺寸由 `withDefaultNodeSize` 在提交前撑开，不走这条判断。
+     */
+    case 'node':
+      return false
+    // 流向不走「先造草稿再拖」这条路（它要带两端的 id），走不到这里。
+    // 真到了这里就按「丢掉」处理——不认识的草稿不该被放进场景
+    case 'flow':
+      return true
     default:
       return assertNever(shape)
   }
@@ -205,6 +301,7 @@ function withEndPoint(draft: Shape, point: Point): Shape {
     case 'rect':
     case 'ellipse':
     case 'link':
+    case 'node':
       return { ...draft, b: point }
     case 'pencil':
       // 手绘在调用点就分流了，走到这里说明两边不同步
@@ -212,12 +309,15 @@ function withEndPoint(draft: Shape, point: Point): Shape {
     // 点符号没有终点可拖：它在按下那一刻就定形了
     case 'symbol':
       return draft
+    // 同理，流向不是拖出来的
+    case 'flow':
+      return draft
     default:
       return assertNever(draft)
   }
 }
 
-/** 绘制过程中的读数，显示在画板页脚。手绘没有可读的量，返回 null */
+/** 绘制过程中的读数，显示在画板页脚。没有可读的量就返回 null */
 function measureText(shape: Shape): string | null {
   switch (shape.kind) {
     case 'line':
@@ -226,12 +326,15 @@ function measureText(shape: Shape): string | null {
       return `长 ${Math.round(m.length)}　角 ${Math.round(m.angleDeg)}°`
     }
     case 'rect':
-    case 'ellipse': {
+    case 'ellipse':
+    case 'node': {
       const r = normalizeRect(shape.a, shape.b)
       return `${Math.round(r.w)} × ${Math.round(r.h)}`
     }
     case 'pencil':
     case 'symbol':
+      // 流向的长度由两端的模块决定，读出来对用户没有意义
+    case 'flow':
       return null
     default:
       return assertNever(shape)
@@ -249,9 +352,19 @@ function draftFor(tool: ToolKind, point: Point): Shape {
       return makeEllipse(point, point)
     case 'pencil':
       return makePencil([point])
-    // 「选择」和「橡皮」在调用点就分流掉了，走到这里说明两边不同步
+    // 模块从零尺寸开始拖；单击不拖的由 `withDefaultNodeSize` 在提交前撑开
+    case 'node':
+      return makeNode(point, point, NODE_DEFAULT_TEXT, NODE_FILL_COLORS[0])
+    /*
+     * 「选择」「橡皮」「流向」在调用点就分流掉了，走到这里说明两边不同步。
+     *
+     * 流向尤其要在这儿挡住：它**不能**先造一个没有两端的草稿再指望拖动补上——
+     * 流向的合法性取决于「两端是两个不同的、存在的模块」，那是手势在按下和
+     * 松手两个时刻才知道的信息，塞进一个草稿图形里表达不出来。
+     */
     case 'select':
     case 'eraser':
+    case 'flow':
       throw new Error(`「${tool}」不产生草稿图形，它应该在上面的分支里被拦掉`)
     default:
       return assertNever(tool)
@@ -275,6 +388,15 @@ export function BoardCanvas({
   const [gesture, setGesture] = useState<Gesture>({ kind: 'none' })
   /** 当前吸到了哪个端点。非空时画一个提示圈 */
   const [snapMark, setSnapMark] = useState<Point | null>(null)
+  /** 正在生效的对齐辅助线。非空时画几条虚线 */
+  const [guides, setGuides] = useState<readonly AlignCandidate[]>([])
+  /**
+   * 正在编辑文字的模块。
+   *
+   * `value` 是**编辑中的草稿**，不写回场景：敲一个字就改一次场景的话，
+   * 撤销栈里会堆满「新、新模、新模块」这种中间状态，撤销一次只退一个字。
+   */
+  const [editing, setEditing] = useState<{ id: ID; value: string } | null>(null)
 
   /**
    * 网格图案的 id 必须是**每个实例独有**的。
@@ -318,6 +440,37 @@ export function BoardCanvas({
     return { point: snapToGrid(raw, snap, GRID_SIZE), snapped: false }
   }
 
+  /** 进入某个模块的文字编辑。先选中它，否则输入框挂在一个没被选中的框上 */
+  const beginEdit = (node: SceneNode) => {
+    onSelect(node.id)
+    setEditing({ id: node.id, value: node.text })
+  }
+
+  /**
+   * 提交文字编辑。
+   *
+   * 文字变长时**只把模块拉宽、不缩**（`fitNodeToText` 的规矩），这样手动拉宽的
+   * 通栏长条不会被一次改字打回原形。
+   */
+  const commitLabel = () => {
+    if (!editing) return
+    const node = scene.shapes.find((s) => s.id === editing.id)
+    if (node?.kind === 'node' && node.text !== editing.value) {
+      onCommit(
+        replaceShape(scene, node.id, fitNodeToText({ ...node, text: editing.value })),
+      )
+    }
+    setEditing(null)
+  }
+
+  /** 双击模块 = 改它的文字。这是「点了没反应」最容易被抱怨的地方，所以双击也接上 */
+  const handleDoubleClick = (event: React.MouseEvent<SVGSVGElement>) => {
+    const svg = svgRef.current
+    if (!svg || tool.kind !== 'select') return
+    const hit = hitTest(scene, toScenePoint(svg, event))
+    if (hit?.kind === 'node') beginEdit(hit)
+  }
+
   const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
     const svg = svgRef.current
     if (!svg || event.button !== 0) return
@@ -339,6 +492,18 @@ export function BoardCanvas({
         setGesture({ kind: 'rotate', id: rotateHit.id, base: scene })
         return
       }
+      // 缩放手柄也排在端点手柄之前：它在模块四角，和端点一样属于「离本体更远
+      // 的那一类」——先判本体的话它永远抢不到指针
+      const resizeHit = hitTestResizeHandle(scene, raw, selectedId)
+      if (resizeHit) {
+        setGesture({
+          kind: 'resize',
+          id: resizeHit.shape.id,
+          corner: resizeHit.corner,
+          base: scene,
+        })
+        return
+      }
       const handleHit = hitTestHandle(scene, raw, selectedId)
       if (handleHit) {
         setGesture({
@@ -351,11 +516,39 @@ export function BoardCanvas({
         return
       }
 
-      // 拖动已有形状时**不吃吸附**：吸上去会让「挪一点点」变得不可能
+      // 拖动已有形状时**不吃网格吸附**：吸上去会让「挪一点点」变得不可能
       const hit = hitTest(scene, raw)
+      // 在 `onSelect` **之前**记下来：它是「这次点击之前就选中了吗」，
+      // 而不是「这次点击选中了吗」——后者恒为真，单击进编辑就退化成
+      // 「点一下任何模块都会进编辑」
+      const wasSelected = hit !== null && hit.id === selectedId
       onSelect(hit?.id ?? null)
       if (hit) {
-        setGesture({ kind: 'move', id: hit.id, start: raw, origin: hit, base: scene })
+        setGesture({
+          kind: 'move',
+          id: hit.id,
+          start: raw,
+          origin: hit,
+          wasSelected,
+          candidates: collectAlignCandidates(scene, hit.id),
+          base: scene,
+        })
+      }
+      return
+    }
+
+    /*
+     * 流向：从一个模块拖到另一个模块。
+     *
+     * 它和别的工具不同——按下时就要求底下**必须**是一个模块，因为
+     * 「从哪出发」是这条流向身份的一半，事后补不出来。
+     */
+    if (tool.kind === 'flow') {
+      const hit = hitTest(scene, raw)
+      if (hit?.kind === 'node') {
+        setGesture({ kind: 'flow', from: hit.id, to: raw, target: null })
+      } else {
+        onNotice('要从一个模块上开始拖，拖到另一个模块上松手。')
       }
       return
     }
@@ -459,17 +652,66 @@ export function BoardCanvas({
       return
     }
 
+    if (gesture.kind === 'resize') {
+      const shape = gesture.base.shapes.find((s) => s.id === gesture.id)
+      if (shape?.kind !== 'node') return
+      const to = snapToGrid(raw, snap, GRID_SIZE)
+      const resized = withResizedCorner(shape, gesture.corner, to)
+      onLive(replaceShape(gesture.base, shape.id, resized))
+      onMeasure(measureText(resized))
+      return
+    }
+
+    if (gesture.kind === 'flow') {
+      const hit = hitTest(scene, raw)
+      const target =
+        hit?.kind === 'node' && hit.id !== gesture.from ? hit.id : null
+      setGesture({ ...gesture, to: raw, target })
+      return
+    }
+
     if (gesture.kind === 'move') {
+      const dx = raw.x - gesture.start.x
+      const dy = raw.y - gesture.start.y
+      const origin = gesture.origin
+
+      /*
+       * 方框类（模块、矩形、椭圆）拖动时吃**对齐辅助线**；其余图形走原来的
+       * 「连带重合端点一起动」。
+       *
+       * 辅助线对三种方框都生效、不只给模块，是因为场景本来就能混放：只给模块
+       * 吸会像一个 bug，而三者本来就有同样的左/中/右。自由线条和符号没有
+       * 「左边缘」这回事，所以不参与。
+       *
+       * 注意这里**不走 `translateBodyWithCoincident`**：那个函数对模块是空转
+       * （`handlesOf(node)` 是空的），但每帧都要遍历全场景的手柄。这是一个
+       * 显式的选择，不是"顺手留着"。连带后果记在 `handlesOf` 的注释里：
+       * 自由图元的端点不会跟着模块走。
+       */
+      if (
+        origin.kind === 'node' ||
+        origin.kind === 'rect' ||
+        origin.kind === 'ellipse'
+      ) {
+        const box = normalizeRect(
+          { x: origin.a.x + dx, y: origin.a.y + dy },
+          { x: origin.b.x + dx, y: origin.b.y + dy },
+        )
+        const snapResult = alignSnap(box, gesture.candidates)
+        setGuides(snapResult.guides)
+        onLive(
+          replaceShape(
+            gesture.base,
+            gesture.id,
+            translateShape(origin, dx + snapResult.dx, dy + snapResult.dy),
+          ),
+        )
+        return
+      }
+
       // 整体平移**并带动**与它端点重合的其它端点：拖机架的时候整个机构
       // 要跟着走，不然四杆机构一挪就散
-      onLive(
-        translateBodyWithCoincident(
-          gesture.base,
-          gesture.id,
-          raw.x - gesture.start.x,
-          raw.y - gesture.start.y,
-        ),
-      )
+      onLive(translateBodyWithCoincident(gesture.base, gesture.id, dx, dy))
       return
     }
 
@@ -505,25 +747,70 @@ export function BoardCanvas({
       // 一次拖动**只记一步历史**。按「每擦掉一个提交一次」写的话，
       // 撤销一次只回来一个图元，等于撤销坏了
       if (gesture.doomed.size > 0) {
-        onCommit(removeShapes(gesture.base, [...gesture.doomed]))
+        // 标红的那批可能只是「要删的模块」，指向它的流向没被标红（它们没被
+        // 点中）。`cascadeOf` 把它们补进来，这样**界面显示的**和**实际删掉的**
+        // 是同一个集合——提交本身也会级联，这里补的是「看得见」这件事
+        const doomed = new Set(gesture.doomed)
+        for (const id of cascadeOf(gesture.base, doomed)) doomed.add(id)
+        onCommit(removeShapes(gesture.base, [...doomed]))
         // 擦掉的正好是选中的那个，选中框要跟着消失——不然它会挂在
         // 一个已经不存在的图形上，看起来像是选中了「空气」
-        if (selectedId && gesture.doomed.has(selectedId)) onSelect(null)
+        if (selectedId && doomed.has(selectedId)) onSelect(null)
       }
       // 一个都没擦到时**不提交**：否则撤销栈里多一步「什么都没变」的空操作，
       // 用户按撤销会觉得没反应
-    } else if (gesture.kind === 'handle' || gesture.kind === 'rotate') {
+    } else if (
+      gesture.kind === 'handle' ||
+      gesture.kind === 'rotate' ||
+      gesture.kind === 'resize'
+    ) {
       // 同拖拽：画面已经由 onLive 更新过，这里只把结果记进历史
       onCommit(scene)
     } else if (gesture.kind === 'move') {
-      // 拖拽期间画面已经由 onLive 更新过了，这里只需要把结果记进历史
-      onCommit(scene)
+      const raw = toScenePoint(svg, event)
+      const moved =
+        Math.hypot(raw.x - gesture.start.x, raw.y - gesture.start.y) >
+        MOVE_THRESHOLD
+
+      if (moved) {
+        // 拖拽期间画面已经由 onLive 更新过了，这里只需要把结果记进历史
+        onCommit(scene)
+      } else if (gesture.wasSelected && gesture.origin.kind === 'node') {
+        // 「单击一个**已经选中**的模块」= 想改文字，和双击等价。
+        // 判定必须在「有没有真的移动过」上：不区分的话，拖模块会顺手进编辑
+        beginEdit(gesture.origin)
+      }
+
+      /*
+       * 点一下（没有真的移动）**不提交**。
+       *
+       * 原来这里是无条件 `onCommit(scene)`，于是每次点图元都会往撤销栈里推
+       * 一条「什么都没变」的记录，而且 `useHistory.commit` 会**清空重做栈**
+       * ——表现是「按撤销没反应、重做也没了」。双击进编辑会让这条路径变成
+       * 家常便饭，所以顺手修掉。
+       */
+    } else if (gesture.kind === 'flow') {
+      // 松在模块上才算建立；松在空处什么都不做、也不要提示——
+      // 用户看得见那条虚线没有落到任何模块上
+      if (gesture.target) {
+        onCommit(
+          addShapes(scene, [makeFlow(gesture.from, gesture.target, INK_COLOR)]),
+        )
+      }
+    } else if (gesture.draft.kind === 'node') {
+      // 模块：单击（没有拖）造出来的是个零尺寸的框，先撑成默认大小；
+      // 落地之后**直接进文字编辑**——占位文字就是「新模块」，
+      // 刚放下的模块本来就该马上能改名字
+      const sized = withDefaultNodeSize(gesture.draft)
+      onCommit(addShapes(scene, [sized]))
+      beginEdit(sized)
     } else if (!isDegenerate(gesture.draft)) {
       onCommit(addShapes(scene, [gesture.draft]))
     }
 
     setGesture({ kind: 'none' })
     setSnapMark(null)
+    setGuides([])
     onMeasure(null)
     onNotice(null)
   }
@@ -542,6 +829,48 @@ export function BoardCanvas({
    */
   const ctx = useMemo(() => contextOf(scene), [scene])
 
+  /**
+   * 橡皮标红的集合 = 点中的 + 会被**级联**删掉的流向。
+   *
+   * 只标点中的那些的话，「屏幕上标红的」和「松手真删的」会是两个集合——
+   * 那几条跟着消失的流向在松手前一刻还是黑的，看起来像被误删了。
+   * 提交时也会补这一批（见 `finishGesture`），两处算的是同一个东西。
+   */
+  const eraseDoomed = useMemo(() => {
+    if (gesture.kind !== 'erase') return null
+    const all = new Set(gesture.doomed)
+    for (const id of cascadeOf(scene, gesture.doomed)) all.add(id)
+    return all
+  }, [gesture, scene])
+
+  /** 建流向手势的预览线。起点是源模块的中心，不精确到边——反正只是提示 */
+  const flowPreview = useMemo(() => {
+    if (gesture.kind !== 'flow') return null
+    const from = scene.shapes.find((s) => s.id === gesture.from)
+    if (from?.kind !== 'node') return null
+    const r = nodeRect(from)
+    return {
+      from: { x: r.x + r.w / 2, y: r.y + r.h / 2 },
+      to: gesture.to,
+      valid: gesture.target !== null,
+    }
+  }, [gesture, scene])
+
+  const flowTarget = gesture.kind === 'flow' ? gesture.target : null
+
+  /**
+   * 正在编辑的那个模块。
+   *
+   * **要再查一次场景**，不能直接用 `editing.id` 对应的旧对象：编辑期间那个
+   * 模块可能已经被删掉（比如撤销把它撤没了），拿着旧对象会把文字写到一个
+   * 已经不存在的图形上。
+   */
+  const editingNode = useMemo(() => {
+    if (!editing) return null
+    const node = scene.shapes.find((s) => s.id === editing.id)
+    return node?.kind === 'node' ? node : null
+  }, [editing, scene])
+
   return (
     <svg
       ref={svgRef}
@@ -558,6 +887,8 @@ export function BoardCanvas({
       onPointerMove={handlePointerMove}
       onPointerUp={finishGesture}
       onPointerCancel={finishGesture}
+      // 双击模块改文字。鼠标事件不是指针事件，所以另挂一个
+      onDoubleClick={handleDoubleClick}
       // 画板自己处理右键，不要弹出浏览器菜单
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -627,9 +958,40 @@ export function BoardCanvas({
         没有把它们从主 `<g>` 里摘出来重画，是因为摘出来要动渲染结构，
         而叠加已经足够说清「这几条要没了」——松手才真的删。
       */}
-      {gesture.kind === 'erase'
+      {/*
+        对齐辅助线：拖动方框类图形时，拖到和别的方框左/中/右（或上/中/下）
+        对齐的位置就出现几条虚线。**只是提示，不是吸附的「魔法」**——位移确实
+        被吸过去了，但辅助线是让用户看得见「吸到谁身上了」。
+      */}
+      {guides.map((guide) =>
+        guide.axis === 'x' ? (
+          <line
+            key={`guide-x-${guide.at}`}
+            x1={guide.at}
+            y1={0}
+            x2={guide.at}
+            y2={scene.height}
+            stroke={GUIDE_COLOR}
+            strokeWidth={1}
+            strokeDasharray="6 4"
+          />
+        ) : (
+          <line
+            key={`guide-y-${guide.at}`}
+            x1={0}
+            y1={guide.at}
+            x2={scene.width}
+            y2={guide.at}
+            stroke={GUIDE_COLOR}
+            strokeWidth={1}
+            strokeDasharray="6 4"
+          />
+        ),
+      )}
+
+      {eraseDoomed
         ? scene.shapes
-            .filter((s) => gesture.doomed.has(s.id))
+            .filter((s) => eraseDoomed.has(s.id))
             .map((s) => (
               <ShapeView
                 key={s.id}
@@ -639,6 +1001,9 @@ export function BoardCanvas({
                   stroke: ERASE_COLOR,
                   strokeWidth: STROKE_WIDTH + 6,
                   strokeOpacity: 0.5,
+                  // 不压掉填充，模块的底色会把标签盖住（见 PartStyle.fill）
+                  fill: 'none',
+                  labelFill: 'transparent',
                 }}
               />
             ))
@@ -656,6 +1021,44 @@ export function BoardCanvas({
                   stroke: SELECT_COLOR,
                   strokeWidth: STROKE_WIDTH + 4,
                   strokeOpacity: 0.35,
+                  // 同上：不压掉填充的话，选中一个模块会让它的文字消失
+                  fill: 'none',
+                  labelFill: 'transparent',
+                }}
+              />
+            ))
+        : null}
+
+      {/*
+        建流向时的预览：从源模块中心拉一条虚线到指针。落在合法目标上时变绿
+        （和吸附提示同色），这样「松手会不会成」在松手之前就看得见。
+      */}
+      {flowPreview ? (
+        <line
+          x1={flowPreview.from.x}
+          y1={flowPreview.from.y}
+          x2={flowPreview.to.x}
+          y2={flowPreview.to.y}
+          stroke={flowPreview.valid ? SNAP_COLOR : GUIDE_COLOR}
+          strokeWidth={2}
+          strokeDasharray="6 4"
+        />
+      ) : null}
+
+      {flowTarget
+        ? scene.shapes
+            .filter((s) => s.id === flowTarget)
+            .map((s) => (
+              <ShapeView
+                key="flow-target"
+                shape={s}
+                ctx={ctx}
+                style={{
+                  stroke: SNAP_COLOR,
+                  strokeWidth: STROKE_WIDTH + 4,
+                  strokeOpacity: 0.6,
+                  fill: 'none',
+                  labelFill: 'transparent',
                 }}
               />
             ))
@@ -663,6 +1066,16 @@ export function BoardCanvas({
 
       {/* 手柄也是界面的一部分，同样不能进导出的图 */}
       {selectedShape ? <HandlesView shape={selectedShape} defs={scene.defs} /> : null}
+
+      {editingNode && editing ? (
+        <LabelEditor
+          node={editingNode}
+          value={editing.value}
+          onChange={(value) => setEditing({ id: editingNode.id, value })}
+          onCommit={commitLabel}
+          onCancel={() => setEditing(null)}
+        />
+      ) : null}
 
       {overlay}
     </svg>
@@ -714,7 +1127,130 @@ function HandlesView({ shape, defs }: { shape: Shape; defs: SceneDefs }) {
           strokeWidth={2}
         />
       ))}
+
+      {/*
+        模块的四角缩放手柄画成**方块**，端点手柄是圆——两者可能同时出现在
+        屏幕上，形状不同才不会点错。命中半径两处共用 `HANDLE_HIT_RADIUS`。
+      */}
+      {resizeHandlesOf(shape).map((at, index) => (
+        <rect
+          key={`resize-${index}`}
+          x={at.x - RESIZE_HANDLE_HALF}
+          y={at.y - RESIZE_HANDLE_HALF}
+          width={RESIZE_HANDLE_HALF * 2}
+          height={RESIZE_HANDLE_HALF * 2}
+          fill="#ffffff"
+          stroke={HANDLE_COLOR}
+          strokeWidth={2}
+        />
+      ))}
     </>
+  )
+}
+
+/**
+ * 模块文字的就地编辑。
+ *
+ * 用 `<foreignObject>` 把一个真正的 HTML `<input>` 放进 SVG，坐标直接用**图纸
+ * 坐标**——`viewBox` 已经把缩放管掉了，不需要自己换算屏幕坐标（这个文件的开头
+ * 明确禁止手工复刻那个变换矩阵）。做成 `DrawBoard` 里的绝对定位浮层反而要自己
+ * 算 CTM，还得配一个 ResizeObserver 跟着窗口尺寸走。
+ *
+ * 它放在**界面层**（主 `<g>` 之外），所以不会进导出的 SVG。导出的图里文字是
+ * `<text>`（走 `shapeToParts`），字号和字体都取自同一组常量，所以屏幕上看到的
+ * 就是导出的样子。
+ */
+function LabelEditor({
+  node,
+  value,
+  onChange,
+  onCommit,
+  onCancel,
+}: {
+  node: SceneNode
+  value: string
+  onChange: (value: string) => void
+  onCommit: () => void
+  onCancel: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  /** Escape 之后接踵而至的 blur 不该当作「确认」 */
+  const cancelledRef = useRef(false)
+
+  useEffect(() => {
+    // 全选：占位文字是「新模块」，用户一进来就该能直接打字把它替掉
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+
+  const box = nodeRect(node)
+  const size = nodeFontSize(node)
+
+  return (
+    <foreignObject
+      x={box.x}
+      y={box.y}
+      width={box.w}
+      height={box.h}
+      data-board-label-editor
+    >
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        // 点输入框是在放光标，不该被画布当成一次拖动
+        onPointerDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onBlur={() => {
+          if (!cancelledRef.current) onCommit()
+        }}
+        onKeyDown={(event) => {
+          /*
+           * 先挡住，别让画板的键盘处理看见这些键。
+           *
+           * DrawBoard 的 Escape 级联排在「焦点是否在输入框里」那个判断**之前**
+           * （它要先处理「上膛的符号 / 选中的图形」），不挡的话按一下 Esc 会
+           * 先取消选中、再关掉整个画板——正在改的文字一起没了。
+           */
+          event.stopPropagation()
+
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            cancelledRef.current = true
+            onCancel()
+            return
+          }
+
+          /*
+           * 中文输入法确认候选词的那个 Enter **不是**「改完了」：此时
+           * `isComposing` 为真（`key` 甚至会是 `'Process'`）。不判它的话，
+           * 敲拼音按回车选词会把半截拼音直接提交掉。
+           *
+           * ⚠️ 这一条 CDP 测不出来（见 XXBJ.md 的测试纪律），只能人工确认：
+           * 切到中文输入法 → 敲 nihao 让候选窗弹出来 → 按 Enter 应当是**选词**
+           * 而不是提交；关掉候选窗再按 Enter 才提交。
+           */
+          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            onCommit()
+          }
+        }}
+        className="w-full text-center outline-none"
+        style={{
+          height: '100%',
+          boxSizing: 'border-box',
+          padding: `0 ${NODE_PADDING_X}px`,
+          fontFamily: FIGURE_FONT_FAMILY,
+          fontSize: `${size}px`,
+          color: pickLabelInk(node.fill),
+          background: 'transparent',
+          border: 'none',
+          // 画布上有 `select-none`，会一路继承进 foreignObject；不覆盖的话
+          // 输入框里的文字没法用鼠标拖选（键盘选还是可以的）
+          userSelect: 'text',
+        }}
+      />
+    </foreignObject>
   )
 }
 
