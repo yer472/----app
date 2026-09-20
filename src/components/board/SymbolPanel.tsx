@@ -1,7 +1,8 @@
 import { Fragment } from 'react'
+import { Loading } from '@/components/ui/Loading'
 import { cn } from '@/lib/cn'
 import type { CustomSymbol } from '@/types/models'
-import { INK_COLOR, STROKE_WIDTH, partToReact } from './render'
+import { STROKE_WIDTH, partToReact } from './render'
 import {
   SYMBOL_GROUPS,
   builtInSymbols,
@@ -33,7 +34,8 @@ interface SymbolPanelProps {
   /** 当前上膛的符号 ref。null 表示没在上膛 */
   armed: string | null
   onArm: (ref: string) => void
-  customs: readonly CustomSymbol[]
+  /** undefined 表示还在读。**不能**当成空数组——那会先闪一句错的空状态文案 */
+  customs: readonly CustomSymbol[] | undefined
   onNewCustom: () => void
   onEditCustom: (symbol: CustomSymbol) => void
   onDeleteCustom: (symbol: CustomSymbol) => void
@@ -101,7 +103,9 @@ export function SymbolPanel({
         </button>
       </div>
 
-      {customs.length === 0 ? (
+      {customs === undefined ? (
+        <Loading className="px-3 pb-3 text-left" />
+      ) : customs.length === 0 ? (
         <p className="px-3 pb-3 text-[11px] leading-relaxed text-neutral-400 dark:text-neutral-500">
           还没有。点「新建」画一个——比如你们课本上那种特别的支座，
           画一次以后就能反复用。
@@ -163,22 +167,32 @@ function SymbolButton({
             : 'border-transparent hover:border-neutral-200 hover:bg-neutral-50 dark:hover:border-neutral-700 dark:hover:bg-neutral-800',
         )}
       >
+        {/*
+          缩略图里的墨色用 `currentColor`，**不能**用 INK_COLOR。
+
+          这是全项目唯一一处「墨色被画在页面 UI 上」的地方——别处的墨线都画在
+          白图纸内部（`SHEET_COLOR` 那块白底），只有这里直接压在面板底色上。
+          写死 `#1f2937` 的话，深色下就是深灰画在深灰上，缩略图整个看不见。
+          `PartStyle.stroke` 本来就支持覆盖（render.tsx 的 attrsFor），
+          所以这里传 currentColor、颜色交给上面那个 text-* 类决定。
+        */}
         <svg
           viewBox={`${bounds.x} ${bounds.y} ${bounds.w} ${bounds.h}`}
           width={THUMB_PX}
           height={THUMB_PX}
           aria-hidden
+          className="text-neutral-700 dark:text-neutral-300"
         >
           <g
             fill="none"
-            stroke={INK_COLOR}
+            stroke="currentColor"
             strokeWidth={STROKE_WIDTH}
             strokeLinecap="round"
             strokeLinejoin="round"
           >
             {parts.map((part, index) => (
               <Fragment key={index}>
-                {partToReact(part, { widthScale })}
+                {partToReact(part, { widthScale, stroke: 'currentColor' })}
               </Fragment>
             ))}
           </g>

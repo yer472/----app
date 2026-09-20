@@ -4,7 +4,10 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { Loading } from '@/components/ui/Loading'
+import { Notice } from '@/components/ui/Notice'
 import { cn } from '@/lib/cn'
+import { errorMessage, runGuarded } from '@/lib/errors'
 import { usePageShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { formatRelative } from '@/lib/time'
 import {
@@ -33,13 +36,19 @@ export function ChapterPage() {
 
   const [creating, setCreating] = useState(false)
   const [deleting, setDeleting] = useState<Note | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const createNote = async () => {
     setCreating(true)
+    setNotice(null)
     try {
       const note = await NoteRepository.create({ chapterId })
       // 直接进入新笔记开始写，不让学生在列表里再找一次
       void navigate(`/subjects/${subjectId}/chapters/${chapterId}/notes/${note.id}`)
+    } catch (e) {
+      // 原来是只有 finally 没有 catch：建不出来时按钮从「创建中…」变回来，
+      // 界面上什么也没发生，用户只会以为没点到
+      setNotice(`新建笔记失败：${errorMessage(e)}`)
     } finally {
       setCreating(false)
     }
@@ -58,9 +67,24 @@ export function ChapterPage() {
   ])
 
   if (chapter === undefined || subject === undefined) {
+    return <Loading className="px-8 py-16" />
+  }
+
+  // 科目没了但章节还在（理论上级联删除会一起清掉，这里兜的是数据被外部改过）。
+  // 原来只判了 undefined 不判 null，于是面包屑会悄悄变成「科目」两个字，
+  // 而 SubjectPage 和 NotePage 对同一种情况都是有提示的
+  if (subject === null) {
     return (
-      <div className="px-8 py-16 text-center text-sm text-neutral-400">
-        加载中…
+      <div className="mx-auto max-w-4xl px-8 py-8">
+        <EmptyState
+          title="科目不存在"
+          description="它可能已经被删除了。"
+          action={
+            <Link to="/">
+              <Button variant="secondary">返回科目列表</Button>
+            </Link>
+          }
+        />
       </div>
     )
   }
@@ -92,7 +116,7 @@ export function ChapterPage() {
           to={`/subjects/${subjectId}`}
           className="hover:text-neutral-900 dark:hover:text-neutral-100"
         >
-          {subject?.name ?? '科目'}
+          {subject.name}
         </Link>
         <span aria-hidden>/</span>
         <span className="text-neutral-900 dark:text-neutral-100">
@@ -112,10 +136,14 @@ export function ChapterPage() {
         </Button>
       </header>
 
+      {notice ? (
+        <Notice tone="error" className="mb-4">
+          {notice}
+        </Notice>
+      ) : null}
+
       {notes === undefined ? (
-        <div className="py-16 text-center text-sm text-neutral-400">
-          加载中…
-        </div>
+        <Loading className="py-16" />
       ) : notes.length === 0 ? (
         <EmptyState
           icon="📝"
@@ -163,7 +191,13 @@ export function ChapterPage() {
                   className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-200/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-neutral-100"
                   onClick={(e) => {
                     e.preventDefault()
-                    void NoteRepository.togglePin(note.id)
+                    // 原来是 void + 无 catch：失败时点一下没有任何反应，
+                    // 用户只会以为按钮坏了
+                    runGuarded(NoteRepository.togglePin(note.id), (message) =>
+                      setNotice(
+                        `${note.isPinned ? '取消置顶' : '置顶'}失败：${message}`,
+                      ),
+                    )
                   }}
                 >
                   {note.isPinned ? '取消置顶' : '置顶'}

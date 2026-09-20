@@ -239,7 +239,11 @@ export function SymbolEditor({ editing, onCancel, onSave }: SymbolEditorProps) {
       </header>
 
       <div className="min-h-0 flex-1 p-4">
-        <div className="mx-auto h-full max-w-md overflow-hidden rounded-lg bg-white ring-1 ring-neutral-200 dark:ring-neutral-800">
+        {/* 不要给这里加 bg-white：里面那块白图纸已经由 BoardCanvas 自己画了，
+            容器再铺一层白的话，深色下窗口比例对不上时露出来的信箱边也是白的，
+            整块看上去就是一个大白框。跟着 DrawBoard 里同类容器的做法，
+            让父级的 bg-neutral-100 / dark:bg-neutral-950 透出来 */}
+        <div className="mx-auto h-full max-w-md overflow-hidden rounded-lg ring-1 ring-neutral-200 dark:ring-neutral-800">
           <BoardCanvas
             scene={scene}
             tool={tool}

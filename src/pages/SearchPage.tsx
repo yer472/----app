@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Link, useSearchParams } from 'react-router-dom'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { Loading } from '@/components/ui/Loading'
 import { cn } from '@/lib/cn'
 import { formatRelative } from '@/lib/time'
 import { entryOf } from '@/lib/shortcuts/catalog'
@@ -185,9 +186,7 @@ export function SearchPage() {
             }
           />
         ) : hits === undefined ? (
-          <div className="py-10 text-center text-sm text-neutral-400">
-            正在搜索…
-          </div>
+          <Loading className="py-10" label="正在搜索…" />
         ) : hits.length === 0 ? (
           <EmptyState
             icon="⌕"
@@ -232,7 +231,7 @@ export function SearchPage() {
                     <div className="mt-1.5 flex items-center gap-2">
                       {hit.note.isPinned ? (
                         <span
-                          className="shrink-0 text-xs text-amber-500"
+                          className="shrink-0 text-xs text-amber-500 dark:text-amber-400"
                           title="已置顶"
                           aria-label="已置顶"
                         >

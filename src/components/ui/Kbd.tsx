@@ -9,7 +9,7 @@ import type { ReactNode } from 'react'
  */
 export function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="shrink-0 rounded border border-neutral-200 px-1 text-[10px] whitespace-nowrap text-neutral-400 dark:border-neutral-600">
+    <kbd className="shrink-0 rounded border border-neutral-200 px-1 text-[10px] whitespace-nowrap text-neutral-400 dark:border-neutral-600 dark:text-neutral-500">
       {children}
     </kbd>
   )

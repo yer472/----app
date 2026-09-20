@@ -132,3 +132,20 @@ export interface SubjectWithStats extends Subject {
 export interface ChapterWithStats extends Chapter {
   noteCount: number
 }
+
+/**
+ * 笔记带上它所属的科目与章节。
+ *
+ * 笔记只存 `chapterId`，要显示「科目 › 章节」就得回查两张表。
+ * 搜索结果和首页的「最近编辑」都要这一组字段，所以定义在这里共用——
+ * 两边各写一份的话，同一条笔记在两处显示的路径迟早会不一样。
+ * （`SearchHit` 是它的扩展，字段名逐字相同。）
+ */
+export interface NoteWithPath {
+  note: Note
+  subjectId: ID
+  subjectName: string
+  subjectColor: string
+  chapterId: ID
+  chapterName: string
+}

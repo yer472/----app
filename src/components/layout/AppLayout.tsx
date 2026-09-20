@@ -1,6 +1,8 @@
 import { Suspense, useEffect } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { Loading } from '@/components/ui/Loading'
 import { requestPersistentStorage } from '@/db'
 import {
   SHORTCUTS_SECTION_ID,
@@ -10,6 +12,7 @@ import { useGlobalShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { startBackupOnLaunch, useBackupStore } from '@/store/backupStore'
 import { useSwStore } from '@/pwa/swStore'
 import { useUiStore } from '@/store/uiStore'
+import { SectionBoundary } from './SectionBoundary'
 import { Sidebar } from './Sidebar'
 
 /**
@@ -87,22 +90,20 @@ export function AppLayout() {
     { id: 'toggle-sidebar', run: toggleSidebar },
   ])
 
-  // 数据库打不开就直接把原因摆出来，不要给一个能操作但存不了东西的空壳界面
+  // 数据库打不开就直接把原因摆出来，不要给一个能操作但存不了东西的空壳界面。
+  // 这条路径在 router 的错误边界之外（它发生在 AppLayout 自己的 effect 里），
+  // 所以它是唯一能处理「库根本打不开」的地方，必须留着。
   if (initError) {
     return (
       <div className="flex h-full items-center justify-center p-8">
-        <div className="max-w-md rounded-lg border border-red-300 bg-red-50 p-6 dark:border-red-900 dark:bg-red-950/40">
-          <h1 className="text-base font-semibold text-red-900 dark:text-red-200">
-            无法访问本地数据库
-          </h1>
-          <p className="mt-2 text-sm text-red-800 dark:text-red-300">
-            {initError}
-          </p>
-          <p className="mt-3 text-sm text-red-800 dark:text-red-300">
-            笔记数据存在浏览器的 IndexedDB 里。请确认：不是无痕/隐私模式、
-            浏览器没有禁用本站的存储权限，然后刷新页面重试。
-          </p>
-        </div>
+        <ErrorState
+          className="max-w-md"
+          title="无法访问本地数据库"
+          kind="storage"
+          // 直接传字符串而不是 new Error(...)：后者会带上一份指向这里的假堆栈，
+          // 折开「详细信息」看到的是 AppLayout 自己，反而误导
+          error={initError}
+        />
       </div>
     )
   }
@@ -110,8 +111,8 @@ export function AppLayout() {
   // 等设置读完再渲染，避免深色模式闪一下白
   if (!hydrated) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-neutral-400">
-        正在启动…
+      <div className="flex h-full items-center justify-center">
+        <Loading label="正在启动…" />
       </div>
     )
   }
@@ -140,16 +141,15 @@ export function AppLayout() {
         ) : null}
 
         <main className="flex-1 overflow-y-auto">
-          {/* 笔记页是懒加载的，编辑器那部分代码要等真正打开笔记时才拉下来 */}
-          <Suspense
-            fallback={
-              <div className="px-8 py-16 text-center text-sm text-neutral-400">
-                正在加载编辑器…
-              </div>
-            }
-          >
-            <Outlet />
-          </Suspense>
+          {/* 内容区的错误边界。侧栏在它外面，所以某个页面崩了的时候
+              导航还在，用户能直接去别的页面。为什么要和 router 的
+              errorElement 分成两层，写在 SectionBoundary 的注释里 */}
+          <SectionBoundary>
+            {/* 笔记页是懒加载的，编辑器那部分代码要等真正打开笔记时才拉下来 */}
+            <Suspense fallback={<Loading className="px-8 py-16" label="正在加载编辑器…" />}>
+              <Outlet />
+            </Suspense>
+          </SectionBoundary>
         </main>
       </div>
 

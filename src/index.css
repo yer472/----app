@@ -60,7 +60,10 @@ body {
   --crepe-color-surface-low: #1a1a1a;
   --crepe-color-on-surface: #d4d4d4;
   --crepe-color-on-surface-variant: #a3a3a3;
-  --crepe-color-outline: #525252;
+  /* 编辑器工具栏的图标和描边。原来取的是 neutral-600（#525252），压在
+     #171717 上只有 2.29:1——低于 3:1，图标发糊。这条是深色对比度扫描
+     抓出来的（脚本会把最差的几处连选择器一起打出来）。 */
+  --crepe-color-outline: #737373;
   --crepe-color-primary: #d4d4d4;
   --crepe-color-secondary: #404040;
   --crepe-color-on-secondary: #e5e5e5;
@@ -84,6 +87,39 @@ body {
   max-width: 100%;
   height: auto;
   border-radius: 0.375rem;
+}
+
+/* ------------------------------------------------------------------
+   深色模式下的图片：压暗 + 一道细边框
+   ------------------------------------------------------------------
+   画板导出的 SVG 是**写死的白底黑线**（决策记在 XXBJ.md 的 M6 实施记录：
+   SVG 在 <img> 里是独立文档，继承不到页面的 currentColor），浅色下完全正确，
+   深色下就是一张贴在本子上的白纸。贴进来的课件截图同理——它们大多也是白底。
+
+   所以这里对所有正文图片一视同仁地压暗，而不是只挑「图形」：区分要么得在
+   blob URL 上挂片段（asset.ts 里 refreshAssetImages 靠 img.src 全等比较，
+   会跟着坏掉），要么加一遍 DOM 后处理反查附件类型，两条路都脆，而收益只有
+   「照片不被压暗」这一点。
+
+   取值 0.9 是算过的：brightness 是线性乘子，**局部对比度基本不动**——
+   图纸里的黑线在白底上的对比只从 14.25:1 降到 12.3:1，照样清楚；
+   压掉的是整块白的绝对亮度（#ffffff → #e6e6e6），夜里刺眼的就是后者。
+   0.8 会更暗一点，但开始伤彩色课件截图；0.95 基本看不出来。
+
+   边框用 border 而不是 box-shadow：图片块外面那层带 overflow:hidden 时，
+   画在盒子外面的阴影会被裁掉。border-box 是全局的（Tailwind 的 preflight），
+   所以加边框只让图片小 2px，不会把它撑出容器、也不会改变比例。
+
+   **只影响显示。** 导出的 SVG、备份文件夹里的文件、打印出来的东西仍然是
+   纯净的白底黑线——压的是屏幕上的这层 CSS，不是数据。
+
+   .paper-figure 是给别处的图纸缩略图（图形列表）复用的同一个效果。
+   两个选择器共用一个规则体，是为了让「压暗多少」只有一个出处。
+   ------------------------------------------------------------------ */
+.dark .note-editor .milkdown img,
+.dark .paper-figure {
+  filter: brightness(0.9);
+  border: 1px solid var(--color-neutral-700);
 }
 
 /* Crepe 默认给内容区加了较大的上下边距，笔记页面已经是分栏布局，收紧一些 */

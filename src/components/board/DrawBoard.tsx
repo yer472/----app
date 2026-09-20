@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Loading } from '@/components/ui/Loading'
 import { refreshAssetImages, toAssetUrl } from '@/lib/asset'
 import { cn } from '@/lib/cn'
 import { useOverlay } from '@/lib/shortcuts/overlay'
@@ -17,9 +18,6 @@ import { SymbolEditor, type SymbolDraft } from './SymbolEditor'
 import { SymbolPanel } from './SymbolPanel'
 import { HOTKEY_TO_TOOL, TOOLS, TOOL_ICONS, type Tool } from './tools'
 import { useSceneHistory } from './useHistory'
-
-/** 稳定的空数组。见下面 customs 的注释 */
-const NO_CUSTOMS: CustomSymbol[] = []
 
 interface DrawBoardProps {
   noteId: ID
@@ -84,9 +82,14 @@ export function DrawBoard({
   const [editingSymbol, setEditingSymbol] = useState<CustomSymbol | null>(null)
   const [deletingSymbol, setDeletingSymbol] = useState<CustomSymbol | null>(null)
 
-  // 空数组要用一个**稳定**的常量：`?? []` 每次渲染都造一个新数组，
-  // 会让下面那个 useMemo 每帧都重算
-  const customs = useLiveQuery(() => SymbolRepository.list(), []) ?? NO_CUSTOMS
+  /**
+   * 自定义符号。**undefined 表示还没读回来**，不要把它当成「一个都没有」。
+   *
+   * 原来这里写的是 `?? NO_CUSTOMS`，于是刚打开画板的那一瞬间，符号面板会
+   * 先显示一句「还没有。点「新建」画一个」——文案是错的，用户看到的
+   * 是一个「你的符号不见了」的瞬间。空数组和「还没读到」是两种状态。
+   */
+  const customs = useLiveQuery(() => SymbolRepository.list(), [])
 
   /**
    * 可放置的点符号：内置的 + 自己画的。
@@ -97,7 +100,9 @@ export function DrawBoard({
   const library = useMemo<Record<string, PointSymbolDef>>(() => {
     const map: Record<string, PointSymbolDef> = {}
     for (const def of POINT_SYMBOLS) map[def.id] = def
-    for (const symbol of customs) map[symbol.id] = defOfCustomSymbol(symbol)
+    // 还没读回来时先只上内置的。面板那一段显示的是加载态，
+    // 所以这个瞬间不会有「点了我的符号却没反应」的窗口
+    for (const symbol of customs ?? []) map[symbol.id] = defOfCustomSymbol(symbol)
     return map
   }, [customs])
 
@@ -456,9 +461,10 @@ export function DrawBoard({
 
         <div className="min-h-0 flex-1 p-4">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm text-neutral-400">
-            正在打开这张图…
-          </div>
+          <Loading
+            className="flex h-full items-center justify-center"
+            label="正在打开这张图…"
+          />
         ) : sceneUnavailable ? (
           // 读不出来就不给画：画了也存不下去（完成按钮禁用），
           // 让人白画一通比直接说清楚更糟。取消出去，正文里那张图原样不动。

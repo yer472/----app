@@ -98,6 +98,31 @@ const RAW = [
     label: '结束标题输入并立刻保存',
     caveat: '光标在笔记标题框里时',
   },
+  /*
+   * 排序键拆成上下两条，而不是一条带两个组合键。
+   *
+   * 理由是 `Binding.run` 的类型是 `() => void`——**不带事件**，所以一条绑定
+   * 没有办法知道自己是被 ArrowUp 还是 ArrowDown 触发的，也就分不出方向。
+   * 与其为此改快捷键层的签名，不如把方向写进 id 里：两条的键不同，
+   * 不会撞「同作用域键」那条断言，界面上也更好读。
+   */
+  {
+    id: 'move-item-up',
+    group: 'page',
+    by: 'app',
+    keys: [{ key: 'ArrowUp', alt: true }],
+    label: '把当前条目上移一位',
+    caveat:
+      '给科目和章节排序。焦点要在那一项的拖拽手柄（⠿）上——Tab 或点一下都行；移动后焦点留在原位，可以连按',
+  },
+  {
+    id: 'move-item-down',
+    group: 'page',
+    by: 'app',
+    keys: [{ key: 'ArrowDown', alt: true }],
+    label: '把当前条目下移一位',
+    caveat: '同上',
+  },
 
   // ---------- 编辑器（Milkdown Crepe 自带） ----------
   {

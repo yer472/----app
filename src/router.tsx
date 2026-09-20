@@ -4,6 +4,7 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { ChapterPage } from '@/pages/ChapterPage'
 import { DevDbCheckPage } from '@/pages/DevDbCheckPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
+import { RouteErrorPage } from '@/pages/RouteErrorPage'
 import { SearchPage } from '@/pages/SearchPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { SubjectListPage } from '@/pages/SubjectListPage'
@@ -25,6 +26,15 @@ export const router = createBrowserRouter([
   {
     path: '/',
     element: <AppLayout />,
+    /*
+     * 外壳（AppLayout / Sidebar）出错时的整页兜底。没有它的话，任何一个
+     * 渲染期抛出的错误都会掉进 react-router 自带的英文错误界面——里面
+     * 还会把 error.stack 打出来。
+     *
+     * 内容区的失败不走这里（侧栏要留着），由 AppLayout 里的 SectionBoundary
+     * 接住。两层的分工写在那个文件里。
+     */
+    errorElement: <RouteErrorPage />,
     children: [
       { index: true, element: <SubjectListPage /> },
       { path: 'subjects/:subjectId', element: <SubjectPage /> },

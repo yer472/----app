@@ -78,13 +78,20 @@ export const ChapterRepository = {
     )
   },
 
+  /** 按传入的 ID 顺序重排（拖拽排序用）。只写真的挪了位的那几行，理由同 SubjectRepository */
   async reorder(orderedIds: ID[]): Promise<void> {
     const timestamp = now()
     await db.transaction('rw', db.chapters, async () => {
+      const rows = await db.chapters.bulkGet(orderedIds)
+      const orderById = new Map(rows.map((row) => [row?.id, row?.order]))
+
       await Promise.all(
-        orderedIds.map((id, index) =>
-          db.chapters.update(id, { order: index, updatedAt: timestamp }),
-        ),
+        orderedIds
+          .map((id, index) => ({ id, index }))
+          .filter(({ id, index }) => orderById.get(id) !== index)
+          .map(({ id, index }) =>
+            db.chapters.update(id, { order: index, updatedAt: timestamp }),
+          ),
       )
     })
   },

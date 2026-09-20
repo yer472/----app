@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { Kbd } from '@/components/ui/Kbd'
 import { Modal } from '@/components/ui/Modal'
+import { Notice, type NoticeTone } from '@/components/ui/Notice'
 import { getStorageUsage } from '@/db'
 import { revokeAllAssetUrls } from '@/lib/asset'
 import {
@@ -125,32 +126,13 @@ function ShortcutReference() {
   )
 }
 
-function Notice({
-  tone,
-  children,
-}: {
-  tone: 'info' | 'warn' | 'error' | 'ok'
-  children: React.ReactNode
-}) {
-  const tones = {
-    info: 'border-neutral-200 bg-neutral-50 text-neutral-600 dark:border-neutral-800 dark:bg-neutral-800/40 dark:text-neutral-300',
-    ok: 'border-green-300 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300',
-    warn: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200',
-    error:
-      'border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300',
-  } as const
-
-  return (
-    <div className={cn('rounded-md border px-3 py-2 text-sm', tones[tone])}>
-      {children}
-    </div>
-  )
-}
+/* Notice 原先是这个文件里的私有函数，M4.5 提到 ui/ 下共用了（删除确认、
+   新建笔记这些写路径的失败提示也要用它）。import 在文件顶部。 */
 
 export function SettingsPage() {
   const [busy, setBusy] = useState<Busy>({ kind: 'none' })
   const [notice, setNotice] = useState<{
-    tone: 'info' | 'ok' | 'warn' | 'error'
+    tone: NoticeTone
     text: string
   } | null>(null)
 

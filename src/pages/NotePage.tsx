@@ -15,8 +15,11 @@ import {
 } from '@/components/editor/NoteEditor'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { Loading } from '@/components/ui/Loading'
+import { Notice } from '@/components/ui/Notice'
 import { revokeAllAssetUrls } from '@/lib/asset'
 import { cn } from '@/lib/cn'
+import { errorMessage } from '@/lib/errors'
 import { usePageShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { scheduleAutoBackup } from '@/store/backupStore'
 import type { Attachment } from '@/types/models'
@@ -99,6 +102,8 @@ function NotePageBody() {
   const [boardDirty, setBoardDirty] = useState(false)
   // Alt+N 的防重入标记，和章节页按钮上那个是同一个作用
   const [creating, setCreating] = useState(false)
+  /** 新建同级笔记失败的原因。原来这种失败是静默的 */
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const editorRef = useRef<NoteEditorHandle>(null)
 
@@ -248,11 +253,16 @@ function NotePageBody() {
   const createSiblingNote = useCallback(async () => {
     if (creating) return
     setCreating(true)
+    setCreateError(null)
     try {
       const note = await NoteRepository.create({ chapterId })
       void navigate(
         `/subjects/${subjectId}/chapters/${chapterId}/notes/${note.id}`,
       )
+    } catch (e) {
+      // 原来是只有 finally：建不出来时按钮从「创建中…」变回来，界面上
+      // 什么也没发生——用户只会以为没点到，再点一次
+      setCreateError(errorMessage(e))
     } finally {
       setCreating(false)
     }
@@ -285,11 +295,7 @@ function NotePageBody() {
   ])
 
   if (note === undefined) {
-    return (
-      <div className="px-8 py-16 text-center text-sm text-neutral-400">
-        加载中…
-      </div>
-    )
+    return <Loading className="px-8 py-16" />
   }
 
   if (note === null) {
@@ -371,11 +377,15 @@ function NotePageBody() {
         </div>
       </header>
 
+      {createError ? (
+        <Notice tone="error" className="mx-8 mt-3">
+          新建笔记失败：{createError}
+        </Notice>
+      ) : null}
+
       <div className="min-h-0 flex-1 overflow-y-auto">
         {initialContent === null ? (
-          <div className="px-8 py-16 text-center text-sm text-neutral-400">
-            正在打开编辑器…
-          </div>
+          <Loading className="px-8 py-16" label="正在打开编辑器…" />
         ) : (
           <div className="mx-auto max-w-3xl px-8 py-6">
             <NoteEditor
@@ -405,7 +415,15 @@ function NotePageBody() {
       />
 
       {boardOpen ? (
-        <Suspense fallback={null}>
+        // 兜底不能是 null：画板是懒加载的，第一次打开要等分片下来，
+        // 那一瞬间整屏空白，看起来像点坏了。兜一个和画板同色的底板 + 一行字。
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-100 dark:bg-neutral-950">
+              <Loading label="正在打开画板…" />
+            </div>
+          }
+        >
           <DrawBoard
             noteId={noteId}
             attachment={editingDrawing}

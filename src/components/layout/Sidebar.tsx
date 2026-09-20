@@ -1,7 +1,11 @@
 import { useLiveQuery } from 'dexie-react-hooks'
+import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
+import { SubjectFormModal } from '@/components/SubjectFormModal'
 import { Kbd } from '@/components/ui/Kbd'
+import { Loading } from '@/components/ui/Loading'
 import { cn } from '@/lib/cn'
+import { pickNextColor } from '@/lib/colors'
 import { SubjectRepository } from '@/repository'
 import { useUiStore } from '@/store/uiStore'
 
@@ -15,6 +19,7 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 
 export function Sidebar() {
   const subjects = useLiveQuery(() => SubjectRepository.list(), [])
+  const [creating, setCreating] = useState(false)
   const theme = useUiStore((s) => s.theme)
   const setTheme = useUiStore((s) => s.setTheme)
 
@@ -58,10 +63,27 @@ export function Sidebar() {
         </div>
 
         {subjects === undefined ? (
-          <div className="px-2.5 py-2 text-sm text-neutral-400">加载中…</div>
+          <Loading className="px-2.5 py-2 text-left" />
         ) : subjects.length === 0 ? (
+          /*
+           * 侧栏是常驻导航，空的时候必须给一条出路：只写「还没有科目」的话，
+           * 用户会去别处找新建入口。
+           *
+           * 这里**直接挂那个新建对话框**，而不是跳回首页再让首页弹出来。
+           * 一开始试的是后者（导航过去并带一个 location.state 标记），
+           * 但首页读到标记就得把它清掉、否则刷新会重复弹，而标记一清、
+           * 由它派生的对话框也跟着消失了——按下去什么都不会发生。
+           * 挂在这里就没有这层时序：侧栏本来就在每个页面都存在。
+           */
           <div className="px-2.5 py-2 text-sm text-neutral-400 dark:text-neutral-500">
-            还没有科目
+            还没有科目。
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              className="mt-1 block text-blue-600 hover:underline dark:text-blue-400"
+            >
+              ＋ 新建科目
+            </button>
           </div>
         ) : (
           <ul className="space-y-0.5">
@@ -99,6 +121,14 @@ export function Sidebar() {
           <span>数据库自检</span>
         </NavLink>
       </div>
+
+      {creating ? (
+        <SubjectFormModal
+          subject={null}
+          suggestedColor={pickNextColor((subjects ?? []).map((s) => s.color))}
+          onClose={() => setCreating(false)}
+        />
+      ) : null}
     </aside>
   )
 }

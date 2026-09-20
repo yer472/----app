@@ -1,14 +1,9 @@
 import { db } from '@/db'
 import { makeSnippet, toPlainText } from '@/lib/markdown'
-import type { ID, Note } from '@/types/models'
+import type { ID, NoteWithPath } from '@/types/models'
+import { pathIndex } from './internal'
 
-export interface SearchHit {
-  note: Note
-  subjectId: ID
-  subjectName: string
-  subjectColor: string
-  chapterId: ID
-  chapterName: string
+export interface SearchHit extends NoteWithPath {
   /** 关键词是在标题里命中的，还是正文里 */
   matchedIn: 'title' | 'content'
   /** 命中处周围的一段纯文本 */
@@ -48,14 +43,10 @@ export const SearchRepository = {
       ? new Set(options.subjectIds)
       : null
 
-    const [notes, chapters, subjects] = await Promise.all([
+    const [notes, { chapterById, subjectById }] = await Promise.all([
       db.notes.toArray(),
-      db.chapters.toArray(),
-      db.subjects.toArray(),
+      pathIndex(),
     ])
-
-    const subjectById = new Map(subjects.map((s) => [s.id, s]))
-    const chapterById = new Map(chapters.map((c) => [c.id, c]))
 
     const hits: SearchHit[] = []
 

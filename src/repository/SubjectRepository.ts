@@ -118,14 +118,27 @@ export const SubjectRepository = {
     )
   },
 
-  /** 按传入的 ID 顺序重排（拖拽排序用） */
+  /**
+   * 按传入的 ID 顺序重排（拖拽排序用）。
+   *
+   * **只写真的挪了位的那几行。** 原来是无条件给所有 id 盖同一个时间戳，
+   * 后果是拖一项就让整页卡片的「更新于」全变成「刚刚」——用户的第一反应
+   * 是数据坏了。order 本身在备份指纹里（`backup/format.ts` 的 `S|` 行），
+   * 所以只改变化的那几行不会让备份漏掉这次改动。
+   */
   async reorder(orderedIds: ID[]): Promise<void> {
     const timestamp = now()
     await db.transaction('rw', db.subjects, async () => {
+      const rows = await db.subjects.bulkGet(orderedIds)
+      const orderById = new Map(rows.map((row) => [row?.id, row?.order]))
+
       await Promise.all(
-        orderedIds.map((id, index) =>
-          db.subjects.update(id, { order: index, updatedAt: timestamp }),
-        ),
+        orderedIds
+          .map((id, index) => ({ id, index }))
+          .filter(({ id, index }) => orderById.get(id) !== index)
+          .map(({ id, index }) =>
+            db.subjects.update(id, { order: index, updatedAt: timestamp }),
+          ),
       )
     })
   },

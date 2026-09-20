@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { Loading } from '@/components/ui/Loading'
 import { Modal } from '@/components/ui/Modal'
 import { resolveAssetUrl, toAssetUrl } from '@/lib/asset'
 import { formatDateTime } from '@/lib/time'
@@ -38,13 +39,18 @@ export function DrawingPicker({
         </Button>
 
         {drawings === undefined ? (
-          <div className="py-6 text-center text-sm text-neutral-400">
-            加载中…
-          </div>
+          <Loading className="py-6" />
         ) : drawings.length === 0 ? (
           <EmptyState
             title="还没有图形"
-            description="点上面的按钮画一张。画好的图会插到正文的光标位置。"
+            description="点下面的按钮画一张。画好的图会插到正文的光标位置。"
+            // 空状态里的按钮要和上面那个「新建图形」做同一件事：空的时候
+            // 用户的视线正落在这里，让他在原地就能动手
+            action={
+              <Button variant="primary" onClick={onCreate}>
+                新建图形
+              </Button>
+            }
           />
         ) : (
           <ul className="flex flex-col gap-2">
@@ -98,7 +104,9 @@ function DrawingThumb({ attachment }: { attachment: Attachment }) {
     <img
       src={url}
       alt=""
-      className="h-14 w-20 shrink-0 rounded object-contain ring-1 ring-neutral-200 dark:ring-neutral-700"
+      // paper-figure：深色下压暗 + 补一道边框，和正文里那张图是同一个效果
+      // （定义在 index.css）。图纸本身是白底的，不压的话深色下是一小块白斑。
+      className="paper-figure h-14 w-20 shrink-0 rounded object-contain ring-1 ring-neutral-200 dark:ring-0"
     />
   )
 }
