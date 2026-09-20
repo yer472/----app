@@ -4,6 +4,8 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { cn } from '@/lib/cn'
 import { formatRelative } from '@/lib/time'
+import { entryOf } from '@/lib/shortcuts/catalog'
+import { matchesBinding } from '@/lib/shortcuts/matcher'
 import { SearchRepository, splitByKeyword, SubjectRepository } from '@/repository'
 
 /** 输入停止多久之后才真正去查。搜索是同步全表扫描，不能每敲一个字跑一遍。 */
@@ -60,14 +62,21 @@ export function SearchPage() {
     setParams(next, { replace: true })
   }, [query, params, setParams])
 
-  // 页面已经打开时再按一次 Ctrl+K，也应该回到搜索框
+  // 页面已经打开时再按一次 Ctrl+K，也应该回到搜索框。
+  //
+  // 这里和 AppLayout 的全局绑定是**两个监听器**，都在冒泡阶段、都处理 Ctrl+K：
+  // 全局那个看到已经在 /search 就什么都不做，剩下重新聚焦这件事归这里。
+  // 两者靠注册顺序（AppLayout 先挂）决定谁先跑，所以**不要**把这里改成
+  // 捕获阶段或加 stopPropagation——那会让全局那个收不到事件。
+  // 组合键从目录里查，免得两边写岔。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        inputRef.current?.focus()
-        inputRef.current?.select()
+      if (!entryOf('search').keys.some((combo) => matchesBinding(event, combo))) {
+        return
       }
+      event.preventDefault()
+      inputRef.current?.focus()
+      inputRef.current?.select()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)

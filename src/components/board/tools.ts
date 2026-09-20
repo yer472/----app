@@ -38,7 +38,12 @@ export const TOOL_ICONS: Record<ToolKind, string> = {
   pencil: '✎',
 }
 
-/** 快捷键 → 工具。用小写字母，匹配时把事件里的 key 也转成小写 */
+/**
+ * 快捷键 → 工具。用小写字母，匹配时把事件里的 key 也转成小写。
+ *
+ * 调用方还要保证**没有**按住 Shift / Alt / Ctrl：Shift 是留给
+ * 「约束角度」的（见 DrawBoard 页脚那句待做），不排除的话会撞在一起。
+ */
 export const HOTKEY_TO_TOOL = new Map<string, ToolKind>(
   TOOLS.map((t) => [t.hotkey, t.kind]),
 )

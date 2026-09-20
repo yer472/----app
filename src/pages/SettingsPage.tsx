@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
+import { Kbd } from '@/components/ui/Kbd'
 import { Modal } from '@/components/ui/Modal'
 import { getStorageUsage } from '@/db'
 import { revokeAllAssetUrls } from '@/lib/asset'
@@ -17,6 +19,13 @@ import { downloadBlob, pickFile } from '@/lib/download'
 import { formatBytes } from '@/lib/format'
 import { formatDateTime } from '@/lib/time'
 import { cn } from '@/lib/cn'
+import {
+  entriesOf,
+  GROUP_ORDER,
+  SHORTCUTS_SECTION_ID,
+  type SettingsScrollState,
+} from '@/lib/shortcuts/catalog'
+import { formatComboList } from '@/lib/shortcuts/matcher'
 import { useSwStore } from '@/pwa/swStore'
 import { BackupRepository, type IntegrityReport } from '@/repository'
 import { useBackupStore } from '@/store/backupStore'
@@ -30,13 +39,29 @@ function Section({
   title,
   description,
   children,
+  id,
+  highlighted,
 }: {
   title: string
   description?: string
   children: React.ReactNode
+  /** 作为 Ctrl+/ 的滚动目标时要有个 id */
+  id?: string
+  highlighted?: boolean
 }) {
   return (
-    <section className="rounded-lg border border-neutral-200 p-5 dark:border-neutral-800">
+    <section
+      id={id}
+      className={cn(
+        'rounded-lg border p-5 transition-colors duration-500',
+        // cn() 没有 tailwind-merge，所以两组 border-* 只能二选一。
+        // 写成 `border-neutral-200 ${highlighted && 'border-blue-400'}`
+        // 会让两个类同时存在，谁赢取决于样式表里的顺序。
+        highlighted
+          ? 'border-blue-400 ring-2 ring-blue-200 dark:border-blue-500 dark:ring-blue-900'
+          : 'border-neutral-200 dark:border-neutral-800',
+      )}
+    >
       <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
         {title}
       </h2>
@@ -47,6 +72,56 @@ function Section({
       ) : null}
       <div className="mt-4">{children}</div>
     </section>
+  )
+}
+
+/**
+ * 快捷键一览。
+ *
+ * 内容全部来自 lib/shortcuts/catalog.ts——那张表同时是绑定的来源，
+ * 所以这里不可能出现「写着 Ctrl+/ 其实是别的」这种漂移。
+ *
+ * 分成四组是因为它们的生效范围完全不同：编辑器和绘图那两组由别人实现，
+ * 全局和页面那两组才是本 App 绑的。不分开的话用户会以为按 Ctrl+Alt+1
+ * 在任何地方都能变成标题。
+ */
+function ShortcutReference() {
+  return (
+    <div className="space-y-5">
+      {GROUP_ORDER.map((group) => (
+        <div key={group.id}>
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <h3 className="text-xs font-medium tracking-wide text-neutral-500 uppercase dark:text-neutral-400">
+              {group.title}
+            </h3>
+            <span className="text-xs text-neutral-400 dark:text-neutral-500">
+              {group.note}
+            </span>
+          </div>
+          <ul className="mt-2 space-y-2">
+            {entriesOf(group.id).map((entry) => (
+              <li
+                key={entry.id}
+                className="flex items-baseline justify-between gap-4"
+              >
+                <span className="text-sm text-neutral-700 dark:text-neutral-300">
+                  {entry.label}
+                  {entry.caveat ? (
+                    <span className="mt-0.5 block text-xs text-neutral-400 dark:text-neutral-500">
+                      {entry.caveat}
+                    </span>
+                  ) : null}
+                </span>
+                {/* 键帽里用空格分隔（Ctrl K），和侧栏那个搜索入口一致。
+                    formatCombo 里保留 + 是因为那才是通用写法，
+                    两者只是显示口径不同 */}
+                <Kbd>{formatComboList(entry.keys).replaceAll('+', ' ')}</Kbd>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -94,6 +169,29 @@ export function SettingsPage() {
 
   const backup = useBackupStore()
   const sw = useSwStore()
+
+  const location = useLocation()
+  const scrollTo =
+    (location.state as SettingsScrollState | null)?.scrollTo ?? null
+  const [highlighted, setHighlighted] = useState<string | null>(null)
+
+  // Ctrl+/ 跳过来时，把那一节滚进视野并闪一下。
+  //
+  // 依赖 location.key 而不是只看 scrollTo：已经在设置页时再按一次 Ctrl+/
+  // 会压一条新的历史记录，key 变了而 scrollTo 没变——只看 scrollTo 就
+  // 不会再滚一次，用户会觉得"按了没反应"。
+  //
+  // 用 location.state 而不是 #hash：hash 会让浏览器在设置页还是个空壳的
+  // 时候就去执行原生锚点滚动，我们会跟它抢。
+  useEffect(() => {
+    if (!scrollTo) return
+    const target = document.getElementById(scrollTo)
+    if (!target) return
+    target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    setHighlighted(scrollTo)
+    const timer = window.setTimeout(() => setHighlighted(null), 1600)
+    return () => window.clearTimeout(timer)
+  }, [scrollTo, location.key])
 
   const handleCheckUpdate = async () => {
     setCheckMessage(null)
@@ -294,6 +392,19 @@ export function SettingsPage() {
               </Notice>
             </div>
           ) : null}
+        </Section>
+
+        {/* ---------- 键盘快捷键 ----------
+            放在「存储状态」之后：那一节只有三行只读摘要，排在它后面能让这份
+            一览表落进第一屏，同时下面几节数据安全相关的操作仍然连成一片。
+            Ctrl+/ 会直接滚到这里，所以它不必挤到最前面。 */}
+        <Section
+          id={SHORTCUTS_SECTION_ID}
+          highlighted={highlighted === SHORTCUTS_SECTION_ID}
+          title="键盘快捷键"
+          description="按 Ctrl+/ 可以随时跳到这里。下面标了「编辑器」的那一批是编辑器自带的，不是本应用实现的。"
+        >
+          <ShortcutReference />
         </Section>
 
         {/* ---------- 应用与离线 ---------- */}

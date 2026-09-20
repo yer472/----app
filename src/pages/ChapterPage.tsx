@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { cn } from '@/lib/cn'
+import { usePageShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { formatRelative } from '@/lib/time'
 import {
   ChapterRepository,
@@ -43,6 +44,18 @@ export function ChapterPage() {
       setCreating(false)
     }
   }
+
+  // Alt+N 新建笔记。要认按钮那个防重入标记——连按两下 Alt+N
+  // 会建出两篇空笔记，而且第二篇会把第一篇挤在那儿没人管。
+  usePageShortcuts([
+    {
+      id: 'create-new',
+      run: () => {
+        if (creating) return
+        void createNote()
+      },
+    },
+  ])
 
   if (chapter === undefined || subject === undefined) {
     return (

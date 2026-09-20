@@ -10,6 +10,7 @@
     "serve": "node scripts/serve.mjs",
     "verify:pwa": "node scripts/verify-pwa.mjs",
     "verify:board": "node scripts/verify-board.mjs",
+    "verify:shortcuts": "node scripts/verify-shortcuts.mjs",
     "lint": "oxlint"
   },
   "dependencies": {

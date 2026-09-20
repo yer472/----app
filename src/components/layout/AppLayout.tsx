@@ -1,7 +1,12 @@
 import { Suspense, useEffect } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { requestPersistentStorage } from '@/db'
+import {
+  SHORTCUTS_SECTION_ID,
+  type SettingsScrollState,
+} from '@/lib/shortcuts/catalog'
+import { useGlobalShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { startBackupOnLaunch, useBackupStore } from '@/store/backupStore'
 import { useSwStore } from '@/pwa/swStore'
 import { useUiStore } from '@/store/uiStore'
@@ -38,7 +43,9 @@ export function AppLayout() {
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed)
   const hydrateBackup = useBackupStore((s) => s.hydrate)
   const updateReady = useSwStore((s) => s.updateReady)
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar)
   const navigate = useNavigate()
+  const location = useLocation()
 
   useEffect(() => {
     void hydrate().then(() => {
@@ -51,18 +58,34 @@ export function AppLayout() {
     void requestPersistentStorage()
   }, [hydrate, hydrateBackup])
 
-  // Ctrl+K 打开搜索。桌面产品的核心体验优势就是全键盘操作，
-  // 这个快捷键也是最容易形成肌肉记忆的一个。
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
+  // 全局快捷键。原来 Ctrl+K 在这里单独挂了一个 effect，现在统一走快捷键层——
+  // 那一层第一件事就是看 defaultPrevented 和浮层计数，单独挂的写法两样都没有。
+  // 组合键写在 lib/shortcuts/catalog.ts 里，这里只引用 id。
+  //
+  // 注意这几个 hook 必须在下面两个提前返回**之前**调用。
+  useGlobalShortcuts([
+    {
+      id: 'search',
+      run: () => {
+        // 已经在搜索页时什么都不做：搜索页自己挂了一个监听器负责
+        //「重新聚焦搜索框」，这里再 navigate 一次会往历史里压一条重复记录
+        //（按返回要按两次才走得掉）。那个监听器注册得比这里晚，
+        // 所以它一定会在后面跑到——别把页面里的监听器改成捕获阶段，那样顺序就反了。
+        if (location.pathname === '/search') return
         void navigate('/search')
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [navigate])
+      },
+    },
+    {
+      id: 'shortcuts',
+      run: () =>
+        void navigate('/settings', {
+          state: {
+            scrollTo: SHORTCUTS_SECTION_ID,
+          } satisfies SettingsScrollState,
+        }),
+    },
+    { id: 'toggle-sidebar', run: toggleSidebar },
+  ])
 
   // 数据库打不开就直接把原因摆出来，不要给一个能操作但存不了东西的空壳界面
   if (initError) {
@@ -99,6 +122,23 @@ export function AppLayout() {
           而不必用 fixed 浮层去压住侧栏底部 */}
       <div className="flex min-h-0 flex-1">
         {sidebarCollapsed ? null : <Sidebar />}
+
+        {/* 折叠之后侧栏整个卸载，而 store 里没有别的入口——忘了 Ctrl+B
+            就是一道单向门，得清浏览器数据才能回去。所以必须留一个看得见的按钮。
+            做成占位的窄条而不是 absolute 浮层：浮层会压在笔记标题输入框上。
+            图标继续用 Unicode 字符，和 ⌕ ◐ ⚙ ◎ 那套保持一致。 */}
+        {sidebarCollapsed ? (
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            title="展开侧栏（Ctrl+B）"
+            aria-label="展开侧栏"
+            className="flex w-8 shrink-0 items-start justify-center border-r border-neutral-200 pt-4 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:border-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+          >
+            <span aria-hidden>»</span>
+          </button>
+        ) : null}
+
         <main className="flex-1 overflow-y-auto">
           {/* 笔记页是懒加载的，编辑器那部分代码要等真正打开笔记时才拉下来 */}
           <Suspense

@@ -1,5 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { NavLink } from 'react-router-dom'
+import { Kbd } from '@/components/ui/Kbd'
 import { cn } from '@/lib/cn'
 import { SubjectRepository } from '@/repository'
 import { useUiStore } from '@/store/uiStore'
@@ -47,9 +48,7 @@ export function Sidebar() {
         >
           <span aria-hidden>⌕</span>
           <span className="flex-1 text-left">搜索笔记</span>
-          <kbd className="shrink-0 rounded border border-neutral-200 px-1 text-[10px] whitespace-nowrap text-neutral-400 dark:border-neutral-600">
-            Ctrl K
-          </kbd>
+          <Kbd>Ctrl K</Kbd>
         </NavLink>
       </div>
 

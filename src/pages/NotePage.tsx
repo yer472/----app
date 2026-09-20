@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { DrawingPicker } from '@/components/board/DrawingPicker'
 import {
   NoteEditor,
@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { revokeAllAssetUrls } from '@/lib/asset'
 import { cn } from '@/lib/cn'
+import { usePageShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { scheduleAutoBackup } from '@/store/backupStore'
 import type { Attachment } from '@/types/models'
 import {
@@ -43,8 +44,33 @@ const DrawBoard = lazy(() =>
 
 type SaveStatus = 'idle' | 'unsaved' | 'saving' | 'saved'
 
+/** flush 的结果。调用方要能区分「存了」「没改动」和「失败了」 */
+type FlushResult = 'saved' | 'unchanged' | 'failed'
+
+/**
+ * 笔记页按 noteId 拆成两层。
+ *
+ * 从 A 笔记切到 B 笔记时，React 认的是同一个路由元素，组件**不会卸载**：
+ * 所有「只初始化一次」的东西——编辑器实例、已保存正文的基准值、未落盘的
+ * pending——都会原样跟到 B 上去。最直接的后果是打开 B 看到的还是 A 的正文，
+ * 接着自动保存把它写进 B，也就是**跨笔记写错数据**。
+ *
+ * 这个问题一直存在，但应用内原本没有「笔记 → 笔记」的链接，所以碰不到；
+ * Alt+N（新建同章节笔记）一上线就是这条路径。
+ *
+ * 用 key 让 React 按笔记身份重建，比一条条加 reset 可靠：以后任何新加的状态
+ * 都自动是干净的，不需要记得来这里补一行。顺带一个好处——切换时旧的那层会走
+ * 卸载清理，也就是那次兜底 flush，而它的 flush 闭包里 capture 的还是旧的
+ * noteId，所以未保存的内容会正确地落到 A 而不是 B 上。
+ */
 export function NotePage() {
+  const { noteId = '' } = useParams()
+  return <NotePageBody key={noteId} />
+}
+
+function NotePageBody() {
   const { subjectId = '', chapterId = '', noteId = '' } = useParams()
+  const navigate = useNavigate()
 
   const note = useLiveQuery(
     async () => (await NoteRepository.get(noteId)) ?? null,
@@ -71,6 +97,8 @@ export function NotePage() {
   // 画板里有没保存的改动。要和正文的脏标记一起进关页提示，
   // 否则画了十分钟一关标签页就全没了
   const [boardDirty, setBoardDirty] = useState(false)
+  // Alt+N 的防重入标记，和章节页按钮上那个是同一个作用
+  const [creating, setCreating] = useState(false)
 
   const editorRef = useRef<NoteEditorHandle>(null)
 
@@ -106,7 +134,7 @@ export function NotePage() {
     setTitle(note.title)
   }, [note])
 
-  const flush = useCallback(async () => {
+  const flush = useCallback(async (): Promise<FlushResult> => {
     const pendingContent = pendingContentRef.current
     const pendingTitle = pendingTitleRef.current
     const contentChanged =
@@ -114,7 +142,7 @@ export function NotePage() {
     const titleChanged =
       pendingTitle !== null && pendingTitle.trim() !== savedTitleRef.current
 
-    if (!contentChanged && !titleChanged) return
+    if (!contentChanged && !titleChanged) return 'unchanged'
 
     setStatus('saving')
     try {
@@ -151,9 +179,11 @@ export function NotePage() {
       // 放在这里而不是监听数据库变化，是因为自动保存本身就很频繁，
       // 由写入方主动通知可以顺带做防抖（见 backupStore 里的 30 秒延迟）。
       scheduleAutoBackup()
+      return 'saved'
     } catch {
       // 落盘失败时保留 pending，下次输入还会再试一次
       setStatus('unsaved')
+      return 'failed'
     }
   }, [noteId])
 
@@ -208,6 +238,51 @@ export function NotePage() {
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [boardDirty])
+
+  /**
+   * 在同一章节里再建一篇笔记，并直接跳过去。
+   *
+   * 不用先 flush：跳转会换掉本层的 key，旧那层走卸载清理时那次兜底 flush
+   * 用的还是旧的 noteId，内容会正确地落到本篇。见文件顶部那段注释。
+   */
+  const createSiblingNote = useCallback(async () => {
+    if (creating) return
+    setCreating(true)
+    try {
+      const note = await NoteRepository.create({ chapterId })
+      void navigate(
+        `/subjects/${subjectId}/chapters/${chapterId}/notes/${note.id}`,
+      )
+    } finally {
+      setCreating(false)
+    }
+  }, [creating, chapterId, subjectId, navigate])
+
+  // 页面级快捷键。Alt+N 按当前页面上下文新建，Ctrl+S 立刻落盘。
+  // 组合键在 lib/shortcuts/catalog.ts 里，这里只引用 id。
+  usePageShortcuts([
+    {
+      id: 'create-new',
+      run: () => {
+        void createSiblingNote()
+      },
+    },
+    {
+      id: 'save-now',
+      run: () => {
+        // 先掐掉防抖定时器再手动存，否则存完一秒后那次又跑一遍
+        if (timerRef.current !== null) {
+          window.clearTimeout(timerRef.current)
+          timerRef.current = null
+        }
+        void flush().then((result) => {
+          // 没有改动时 flush 什么都不做，界面上毫无反应——用户会以为快捷键坏了，
+          // 所以补一个「已保存」。失败时 flush 自己已经把状态置成「未保存」，别覆盖它。
+          if (result === 'unchanged') setStatus('saved')
+        })
+      },
+    },
+  ])
 
   if (note === undefined) {
     return (

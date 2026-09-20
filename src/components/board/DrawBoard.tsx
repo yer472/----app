@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { refreshAssetImages, toAssetUrl } from '@/lib/asset'
 import { cn } from '@/lib/cn'
+import { useOverlay } from '@/lib/shortcuts/overlay'
 import { AttachmentRepository } from '@/repository'
 import type { Attachment, ID } from '@/types/models'
 import { BoardCanvas } from './BoardCanvas'
@@ -53,6 +54,11 @@ export function DrawBoard({
   const [error, setError] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [confirmingClose, setConfirmingClose] = useState(false)
+
+  // 登记成浮层：全局快捷键层据此整体让位。
+  // 下面那个 stopPropagation 其实已经挡住了 window 上的监听器，
+  // 这里是第二道保险，也让「画板是个浮层」这件事在代码里说得明白。
+  useOverlay(true)
 
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -167,23 +173,26 @@ export function DrawBoard({
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     // 画板是模态的，键盘事件不该漏到外面去。
-    // 最要紧的是 Ctrl+K —— 那是 AppLayout 挂在 window 上的全局快捷键，
-    // 不挡住的话画到一半按一下就被导航去搜索页，未保存的图全没了。
+    // 最要紧的是全局快捷键层（lib/shortcuts）——它挂在 window 的冒泡阶段，
+    // 这里挡住就收不到。不挡的话画到一半按一下 Ctrl+K 就被导航去搜索页，
+    // 未保存的图全没了。
     //
     // 在容器的冒泡处理器里 stopPropagation 不会影响说明文字输入框：
     // 输入框是事件目标，冒泡到这里时它已经收到过事件了。
+    //
+    // 例外：对话框的 Esc 挂在 window 的**捕获**阶段（见 Modal.tsx），
+    // 从 window 往下走，这里挡不住它——那是故意的，否则画板里嵌套的
+    //「放弃这次改动？」确认框按 Esc 就关不掉了。
     event.stopPropagation()
 
     const target = event.target as HTMLElement
     const inField =
       target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
 
+    // Esc 归对话框管（见上）。没有对话框开着时才是「关画板」。
     if (event.key === 'Escape') {
       event.preventDefault()
-      if (confirmingClose) {
-        setConfirmingClose(false)
-        return
-      }
+      if (confirmingClose) return
       requestClose()
       return
     }
@@ -213,6 +222,12 @@ export function DrawBoard({
       return
     }
     if (mod) return
+
+    // 单键工具快捷键必须**没有**修饰键。
+    // 原来只比 key，于是 Shift+V / Alt+R 也会换工具——而 Shift 在画板里
+    // 是留给「暂时约束角度」的（页脚里写着待做），两者会撞在一起。
+    // Ctrl / Meta 上面那句 `if (mod) return` 已经挡掉了。
+    if (event.altKey || event.shiftKey) return
 
     const nextTool = HOTKEY_TO_TOOL.get(key)
     if (nextTool) {

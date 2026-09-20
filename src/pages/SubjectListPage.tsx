@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { Modal } from '@/components/ui/Modal'
 import { pickNextColor, SUBJECT_COLORS } from '@/lib/colors'
 import { cn } from '@/lib/cn'
+import { usePageShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { formatRelative } from '@/lib/time'
 import { SubjectRepository } from '@/repository'
 import type { Subject, SubjectWithStats } from '@/types/models'
@@ -32,6 +33,12 @@ export function SubjectListPage() {
   }
 
   const usedColors = (subjects ?? []).map((s) => s.color)
+
+  // Alt+N 新建科目。和点按钮走同一条路，所以行为不会有第二种。
+  // 组合键在 lib/shortcuts/catalog.ts 里，这里只引用 id。
+  usePageShortcuts([
+    { id: 'create-new', run: () => setDialog({ kind: 'form', subject: null }) },
+  ])
 
   return (
     <div className="mx-auto max-w-4xl px-8 py-8">

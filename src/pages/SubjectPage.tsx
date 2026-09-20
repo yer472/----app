@@ -6,6 +6,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Modal } from '@/components/ui/Modal'
 import { cn } from '@/lib/cn'
+import { usePageShortcuts } from '@/lib/shortcuts/useShortcuts'
 import { formatRelative } from '@/lib/time'
 import { ChapterRepository, SubjectRepository } from '@/repository'
 import type { Chapter } from '@/types/models'
@@ -38,6 +39,12 @@ export function SubjectPage() {
         : current,
     )
   }
+
+  // Alt+N 新建章节。和点按钮走同一条路，所以行为不会有第二种。
+  // 组合键在 lib/shortcuts/catalog.ts 里，这里只引用 id。
+  usePageShortcuts([
+    { id: 'create-new', run: () => setDialog({ kind: 'form', chapter: null }) },
+  ])
 
   // subject === undefined 表示还在读；null 表示确实没有这条记录
   if (subject === undefined) {
