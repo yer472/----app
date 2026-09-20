@@ -66,7 +66,33 @@ function section(title) {
 
 // ---------------------------------------------------------------- dev 服务器
 
+/**
+ * ⚠️ 这次「端口已经有人应答」的检查不能省。
+ *
+ * `--strictPort` 会让新服务器在端口被占时退出，但下面的 `waitFor` 只等
+ * 「这个端口有响应」——上一次自检没清干净的服务器会替它应答，于是整个脚本
+ * 测的是那个旧进程里的旧代码，而且全程不报错。这个坑真踩过：5198 上残留着
+ * 一个上个会话起的服务器，「目录里的全局绑定与代码里注册的对不上」就一直
+ * 失败，而代码本身是好的。**假测试比没有测试更糟**，它会让人去改没坏的东西。
+ */
+async function assertPortFree() {
+  let occupied = false
+  try {
+    occupied = (await fetch(BASE)).ok
+  } catch {
+    occupied = false
+  }
+  if (occupied) {
+    throw new Error(
+      `端口 ${PORT} 上已经有一个服务器在跑（多半是上次自检没清理干净）。\n` +
+        `      它会替本次启动的服务器应答，导致测的是旧代码。先杀掉它：\n` +
+        `      netstat -ano | findstr :${PORT}   然后 taskkill /PID <pid> /T /F`,
+    )
+  }
+}
+
 async function startDevServer() {
+  await assertPortFree()
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   const child = spawn(
     npm,
@@ -236,7 +262,7 @@ const ACTIVE_TOOL = `(() => {
 
 // 用 ?. 是因为画板关掉之后这个选择器会返回 null，
 // 而「画板还在不在」正是靠它来判断的
-const BOARD = `(document.querySelector('pattern#xxbj-grid')?.closest('svg') ?? null)`
+const BOARD = `(document.querySelector('[data-board="main"]') ?? null)`
 
 const EDITOR_TEXT = `document.querySelector('.note-editor')?.innerText ?? ''`
 
@@ -357,6 +383,28 @@ try {
     return `${r.total} 条（${Object.entries(r.groups).map(([k, v]) => `${k} ${v}`).join('，')}）`
   })
 
+  /*
+   * 画板那一组（`by: 'board'`）在别处是被排除在机械比对之外的——它不由
+   * 快捷键层实现，所以「目录写了但没绑定」不成立。代价是它的**文案会漂**：
+   * 条目里那句「依次对应 V、L、R、O、P」是手写的散文，加了橡皮之后没人改
+   * 就永远停在那儿。所以这里单独拿它和真正的映射表对一次。
+   */
+  await check('★ 画板工具那条写的字母和实际的工具映射一致', async () => {
+    const r = await evaluate(`(async () => {
+      const cat = await import('/src/lib/shortcuts/catalog.ts')
+      const tools = await import('/src/components/board/tools.ts')
+      return {
+        inCatalog: cat.entryOf('bd-tools').keys.map((k) => k.key).sort(),
+        inCode: [...tools.HOTKEY_TO_TOOL.keys()].sort(),
+      }
+    })()`)
+    assert(
+      JSON.stringify(r.inCatalog) === JSON.stringify(r.inCode),
+      `目录里写的是 ${r.inCatalog.join('/')}，代码里是 ${r.inCode.join('/')}`,
+    )
+    return r.inCode.map((k) => k.toUpperCase()).join(' ')
+  })
+
   await check('★ 目录里的全局绑定与代码里注册的完全对得上', async () => {
     const r = await evaluate(`(async () => {
       const cat = await import('/src/lib/shortcuts/catalog.ts')
@@ -371,7 +419,12 @@ try {
     // 两个方向都要查：目录里写了没绑（用户按下去没反应），
     // 或者绑了目录里没写（一览表漏了一条）
     const missing = r.appGlobalIds.filter((id) => !r.registered.includes(id))
-    assert(missing.length === 0, `目录里写了但没绑定：${missing.join(', ')}`)
+    assert(
+      missing.length === 0,
+      `目录里写了但没绑定：${missing.join(', ')}\n` +
+        `      目录认为该绑的：${JSON.stringify(r.appGlobalIds)}\n` +
+        `      代码实际注册的：${JSON.stringify(r.registered)}`,
+    )
     assert(r.unknown.length === 0, `绑定了但目录里没有：${r.unknown.join(', ')}`)
     return `已注册 ${r.registered.join(', ')}`
   })
@@ -968,12 +1021,21 @@ try {
   console.log('\n' + '─'.repeat(60))
   console.log(failures === 0 ? '全部通过。' : `${failures} 项失败。`)
   await edge.close()
-  devServer.kill()
-  // Windows 上 npm 会再起一个子进程，杀掉整棵树
+  // 杀掉整棵进程树，而且**等它真的退完**再走。
+  // 原来是 spawn 完立刻 process.exit()，taskkill 有可能还没跑完父进程就没了，
+  // 于是 dev 服务器留在端口上——下一次自检就会悄悄测那份旧代码
+  //（见 assertPortFree 的注释，这个坑真踩过）。
   if (process.platform === 'win32' && devServer.pid) {
-    spawn('taskkill', ['/pid', String(devServer.pid), '/T', '/F'], {
-      stdio: 'ignore',
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(devServer.pid), '/T', '/F'], {
+        stdio: 'ignore',
+      })
+      killer.on('exit', resolve)
+      killer.on('error', resolve)
     })
+  } else {
+    devServer.kill()
   }
+  await sleep(300)
   process.exit(failures === 0 ? 0 : 1)
 }

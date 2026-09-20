@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie'
 import type {
   Attachment,
   Chapter,
+  CustomSymbol,
   Note,
   Setting,
   Subject,
@@ -21,6 +22,7 @@ export class XxbjDatabase extends Dexie {
   notes!: Table<Note, string>
   attachments!: Table<Attachment, string>
   settings!: Table<Setting, string>
+  symbols!: Table<CustomSymbol, string>
 
   constructor() {
     super('xxbj')
@@ -32,6 +34,25 @@ export class XxbjDatabase extends Dexie {
       notes: 'id, chapterId, isPinned, updatedAt, createdAt, *tags',
       attachments: 'id, noteId, createdAt',
       settings: 'key',
+    })
+
+    /*
+     * v2：加一张「自定义符号」表。
+     *
+     * Dexie 的 `stores` 是**跨版本累积**的，所以只写新表也能正确升级
+     * （v1 那五张表会继承过来）。这里仍然把完整 schema 重写一遍：两种解读
+     * 下都正确，成本是五行，而万一哪天 Dexie 改了合并语义、或者别人照抄
+     * 这段代码时理解成「完整 schema」，代价是另外五张表被当成「要删的表」。
+     *
+     * 只加表、不改字段，所以**不需要 `upgrade()`**。
+     */
+    this.version(2).stores({
+      subjects: 'id, order, name, updatedAt',
+      chapters: 'id, subjectId, order, updatedAt',
+      notes: 'id, chapterId, isPinned, updatedAt, createdAt, *tags',
+      attachments: 'id, noteId, createdAt',
+      settings: 'key',
+      symbols: 'id, name, createdAt',
     })
   }
 }

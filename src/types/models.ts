@@ -5,6 +5,8 @@
  * 这里的类型既是 IndexedDB 的表结构，也是 UI 层使用的数据形状。
  */
 
+import type { Point, Shape } from './scene'
+
 export type ID = string
 export type ISODateTime = string
 
@@ -90,6 +92,34 @@ export interface Attachment {
 export interface Setting {
   key: string
   value: unknown
+}
+
+/**
+ * 自定义符号：自己画的机构符号。
+ *
+ * 这是**用户创作的内容**，所以它是一张正经的表、也进备份——不能图省事塞进
+ * `settings` 里（那张表不进备份，恢复一次就没了）。
+ *
+ * 只允许「点符号」这一种形态：定尺寸、可旋转、点一下放置。两点符号
+ * （构件、带传动那类长度可拉的）的几何是代码里的生成器，不是数据，
+ * 所以不在自定义范围内——要不同尺寸就存两个自定义符号。
+ *
+ * `shapes` 存的是**符号编辑画布里的普通图元**（只允许 line / rect / ellipse /
+ * pencil），不是渲染用的零件表：编辑已有符号时要把定义还原成可编辑的图元，
+ * 而 `shapes` 本身就是存储形态，还原是恒等的。渲染用的 `parts` 由
+ * `defOfCustomSymbol` 推出来，不各存一份，就不会出现「库里的和图上画的不一样」。
+ */
+export interface CustomSymbol {
+  id: ID
+  name: string
+  /** 局部坐标。插入点也是局部坐标里的一个点，一般就是 (0,0) */
+  shapes: Shape[]
+  origin: Point
+  /** 编辑画布的尺寸，用于还原出一样大的画框 */
+  width: number
+  height: number
+  createdAt: ISODateTime
+  updatedAt: ISODateTime
 }
 
 /** 科目带上统计信息，用于列表页展示 */

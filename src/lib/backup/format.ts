@@ -26,6 +26,7 @@ import type {
   Attachment,
   AttachmentType,
   Chapter,
+  CustomSymbol,
   ID,
   ISODateTime,
   Note,
@@ -33,7 +34,16 @@ import type {
 } from '@/types/models'
 
 export const BACKUP_FORMAT = 'xxbj-backup'
-export const BACKUP_VERSION = 1
+/**
+ * 备份格式版本。
+ *
+ * 1 → 2 是加了**自定义符号库**。这个号只被当作**上界**用（见 parseBackupFile：
+ * 文件版本比 App 支持的还新就直接报错）。所以不升的话，旧版 App 导入新备份时
+ * 会**静默丢掉整个符号库**——用户自己画的东西无声消失。报错比静默丢数据好。
+ *
+ * 反向不受影响：新版读旧备份照常（`symbols` 缺席时按空数组读）。
+ */
+export const BACKUP_VERSION = 2
 export const MANIFEST_FORMAT = 'xxbj-manifest'
 
 /** 压缩包 / 备份文件夹里的固定文件名 */
@@ -55,6 +65,8 @@ export interface Snapshot {
   chapters: Chapter[]
   notes: Note[]
   attachments: Attachment[]
+  /** 自定义符号库。它是**用户创作的内容**，所以和笔记一样进备份 */
+  symbols: CustomSymbol[]
 }
 
 /** 附件在备份里的元信息。图片本体是单独的文件，不在这里。 */
@@ -88,6 +100,8 @@ export interface BackupFile {
   chapters: Chapter[]
   notes: Note[]
   attachments: BackupAttachmentMeta[]
+  /** 自定义符号库。v2 新增；v1 的备份里没有这个字段 */
+  symbols: CustomSymbol[]
 }
 
 export interface BackupCounts {
@@ -95,6 +109,8 @@ export interface BackupCounts {
   chapters: number
   notes: number
   attachments: number
+  /** 自定义符号个数。恢复是覆盖式的，所以这个数要摆在确认框里给用户看 */
+  symbols: number
   /** 图片总字节数 */
   imageBytes: number
 }
@@ -179,6 +195,7 @@ export function countSnapshot(snapshot: Snapshot): BackupCounts {
     chapters: snapshot.chapters.length,
     notes: snapshot.notes.length,
     attachments: snapshot.attachments.length,
+    symbols: snapshot.symbols.length,
     imageBytes: snapshot.attachments.reduce((sum, a) => sum + a.sizeBytes, 0),
   }
 }
@@ -195,12 +212,16 @@ export function ensureManifestShape(raw: BackupManifest): BackupManifest {
     format: MANIFEST_FORMAT,
     version: raw.version ?? BACKUP_VERSION,
     lastBackupAt: raw.lastBackupAt ?? '',
-    counts: raw.counts ?? {
-      subjects: 0,
-      chapters: 0,
-      notes: 0,
-      attachments: 0,
-      imageBytes: 0,
+    // 逐字段兜底，**不是整块 `raw.counts ?? {...}`**：清单存在用户的文件夹里、
+    // 可能被手改过，一个只写了一半的 counts 会原样通过，然后
+    // `counts.symbols === undefined` 就流进了设置页和恢复确认框
+    counts: {
+      subjects: raw.counts?.subjects ?? 0,
+      chapters: raw.counts?.chapters ?? 0,
+      notes: raw.counts?.notes ?? 0,
+      attachments: raw.counts?.attachments ?? 0,
+      symbols: raw.counts?.symbols ?? 0,
+      imageBytes: raw.counts?.imageBytes ?? 0,
     },
     contentHash: raw.contentHash ?? '',
     noteHashes: raw.noteHashes ?? {},
@@ -227,6 +248,24 @@ export function contentHashOf(snapshot: Snapshot): string {
   }
   for (const attachment of [...snapshot.attachments].sort((a, b) => a.id.localeCompare(b.id))) {
     parts.push(`A|${attachment.id}|${attachment.noteId}|${attachment.sizeBytes}`)
+  }
+  /*
+   * ⚠️ 符号库**必须**进指纹。
+   *
+   * 不进的话：用户新建/改了一个自定义符号 → 内容指纹没变 → 镜像备份判定
+   * `unchanged` 直接跳过整轮写入，当天的每日快照也不写（用的是同一个指纹）。
+   * 结果就是「符号一直不进备份，直到别的数据恰好也变了」——纯粹的静默丢数据，
+   * 而且是这条功能里最可能发生的一种（符号改完就关电脑）。
+   *
+   * 这条断言真发挥作用过一次：改这段的脚本没匹配上、静默什么都没做，
+   * 自检脚本当场就把「改了符号指纹不变」报了出来。
+   */
+  for (const symbol of [...snapshot.symbols].sort((a, b) => a.id.localeCompare(b.id))) {
+    parts.push(
+      `Y|${symbol.id}|${symbol.name}|${symbol.origin.x}|${symbol.origin.y}|${symbol.updatedAt}`,
+    )
+    // 图形单独哈希：一个符号的图元可能有几十条
+    parts.push(`D|${hashString(JSON.stringify(symbol.shapes))}`)
   }
 
   return hashString(parts.join('\n'))
@@ -256,6 +295,7 @@ export function buildBackupFile(
       createdAt: attachment.createdAt,
       path: imagePathFor(attachment),
     })),
+    symbols: snapshot.symbols,
   }
 }
 
@@ -382,7 +422,7 @@ export function buildReadme(counts: BackupCounts, at: ISODateTime): string {
     '====================',
     '',
     `备份时间：${formatDateTime(at)}`,
-    `内容：${counts.subjects} 个科目 / ${counts.chapters} 个章节 / ${counts.notes} 篇笔记 / ${counts.attachments} 张图片`,
+    `内容：${counts.subjects} 个科目 / ${counts.chapters} 个章节 / ${counts.notes} 篇笔记 / ${counts.attachments} 张图片 / ${counts.symbols} 个自定义符号`,
     '',
     '这个文件夹里有什么',
     '------------------',
@@ -452,17 +492,65 @@ export function parseBackupFile(raw: string, source: string): BackupFile {
     version: file.version,
     app: file.app ?? '学习笔记 (XXBJ)',
     exportedAt: file.exportedAt ?? new Date().toISOString(),
-    counts: file.counts ?? countSnapshot({
-      subjects: file.subjects,
-      chapters: file.chapters,
-      notes: file.notes,
-      attachments: [],
-    }),
+    counts:
+      file.counts ??
+      countSnapshot({
+        subjects: file.subjects,
+        chapters: file.chapters,
+        notes: file.notes,
+        attachments: [],
+        symbols: [],
+      }),
     subjects: file.subjects,
     chapters: file.chapters,
     notes: file.notes,
     attachments: Array.isArray(file.attachments) ? file.attachments : [],
+    // v1 的备份没有这个字段，按空数组读——不是「把用户的符号清掉」，
+    // 而是「那份备份里本来就没有」。恢复会清空现有符号库，这件事在
+    // 恢复确认框里会显示出来（counts 里有符号数），用户看得见
+    symbols: Array.isArray(file.symbols)
+      ? file.symbols.filter(isCustomSymbol)
+      : [],
   }
+}
+
+/**
+ * 自定义符号的形状校验。
+ *
+ * 比 subjects/notes 严一档：符号是要被**渲染**的，一份半坏的备份
+ * （`shapes` 不是数组、或者塞了个缺字段的对象）会让整个符号面板崩掉。
+ * 仓库里对笔记只做浅校验是因为它们最终都当字符串用，符号不是。
+ */
+function isCustomSymbol(value: unknown): value is CustomSymbol {
+  if (typeof value !== 'object' || value === null) return false
+  const s = value as Record<string, unknown>
+  return (
+    typeof s.id === 'string' &&
+    typeof s.name === 'string' &&
+    Array.isArray(s.shapes) &&
+    s.shapes.every(isSceneShape) &&
+    isScenePoint(s.origin) &&
+    typeof s.width === 'number' &&
+    typeof s.height === 'number'
+  )
+}
+
+const SHAPE_KINDS = new Set(['line', 'rect', 'ellipse', 'pencil'])
+
+/** 自定义符号里**只允许**普通图元：放符号进去会形成递归 */
+function isSceneShape(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const shape = value as Record<string, unknown>
+  if (typeof shape.id !== 'string') return false
+  if (typeof shape.kind !== 'string' || !SHAPE_KINDS.has(shape.kind)) return false
+  if (shape.kind === 'pencil') return Array.isArray(shape.points)
+  return isScenePoint(shape.a) && isScenePoint(shape.b)
+}
+
+function isScenePoint(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const p = value as Record<string, unknown>
+  return typeof p.x === 'number' && typeof p.y === 'number'
 }
 
 /** data.json 里存的其实是 BackupFile，这里给它收个尾 */

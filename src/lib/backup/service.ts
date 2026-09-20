@@ -159,6 +159,7 @@ export async function runBackup(
     chapters: snapshot.chapters.length,
     notes: snapshot.notes.length,
     attachments: snapshot.attachments.length,
+    symbols: snapshot.symbols.length,
     imageBytes: snapshot.attachments.reduce((sum, a) => sum + a.sizeBytes, 0),
   }
 

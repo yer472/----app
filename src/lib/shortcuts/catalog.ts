@@ -235,9 +235,11 @@ const RAW = [
       { key: 'r' },
       { key: 'o' },
       { key: 'p' },
+      { key: 'e' },
     ],
-    label: '画板工具：选择 / 直线 / 矩形 / 椭圆 / 手绘',
-    caveat: '依次对应 V、L、R、O、P；按住 Shift 或 Alt 不算',
+    label: '画板工具：选择 / 直线 / 矩形 / 椭圆 / 手绘 / 橡皮',
+    caveat:
+      '依次对应 V、L、R、O、P、E；按住 Shift 或 Alt 不算（Shift 是「约束角度」）',
   },
   {
     id: 'bd-undo',

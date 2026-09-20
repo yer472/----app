@@ -160,16 +160,20 @@ export async function parseArchive(
 
 /** 这一份备份里都有什么，用于导入前的确认提示 */
 export function describeArchive(backup: BackupFile): string {
-  const counts = backup.counts ?? countSnapshot({
-    subjects: backup.subjects,
-    chapters: backup.chapters,
-    notes: backup.notes,
-    attachments: [],
-  })
+  const counts =
+    backup.counts ??
+    countSnapshot({
+      subjects: backup.subjects,
+      chapters: backup.chapters,
+      notes: backup.notes,
+      attachments: [],
+      symbols: [],
+    })
   const when = backup.exportedAt
     ? new Date(backup.exportedAt).toLocaleString('zh-CN')
     : '未知时间'
-  return `${counts.subjects} 个科目、${counts.chapters} 个章节、${counts.notes} 篇笔记、${counts.attachments} 张图片（导出于 ${when}）`
+  const symbolPart = counts.symbols > 0 ? `、${counts.symbols} 个自定义符号` : ''
+  return `${counts.subjects} 个科目、${counts.chapters} 个章节、${counts.notes} 篇笔记、${counts.attachments} 张图片${symbolPart}（导出于 ${when}）`
 }
 
 export type { BackupFile, BackupCounts, NoteDocument, Snapshot }

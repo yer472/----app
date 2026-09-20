@@ -21,27 +21,30 @@ export const BackupRepository = {
    * 打包到一半数据变了的中间状态。
    */
   async snapshot(): Promise<Snapshot> {
-    const [subjects, chapters, notes, attachments] = await Promise.all([
+    const [subjects, chapters, notes, attachments, symbols] = await Promise.all([
       db.subjects.toArray(),
       db.chapters.toArray(),
       db.notes.toArray(),
       db.attachments.toArray(),
+      db.symbols.toArray(),
     ])
-    return { subjects, chapters, notes, attachments }
+    return { subjects, chapters, notes, attachments, symbols }
   },
 
   async counts(): Promise<BackupCounts> {
-    const [subjects, chapters, notes, attachments] = await Promise.all([
+    const [subjects, chapters, notes, attachments, symbols] = await Promise.all([
       db.subjects.count(),
       db.chapters.count(),
       db.notes.count(),
       db.attachments.toArray(),
+      db.symbols.count(),
     ])
     return {
       subjects,
       chapters,
       notes,
       attachments: attachments.length,
+      symbols,
       imageBytes: attachments.reduce((sum, a) => sum + a.sizeBytes, 0),
     }
   },
@@ -49,25 +52,33 @@ export const BackupRepository = {
   /**
    * 用一份备份完整替换现有数据。
    *
-   * 注意只清空这四张数据表，**不动 settings**——主题、备份文件夹句柄
-   * 这些配置不属于"数据"，清掉会让用户每次导入后都要重新授权文件夹。
+   * 覆盖范围是**内容和它的派生设置之外的一切**：科目、章节、笔记、附件，
+   * 以及自定义符号库。**不动 settings**——主题、备份文件夹句柄这些是配置，
+   * 清掉会让用户每次导入后都要重新授权文件夹。
+   *
+   * 符号库归到「内容」这一边：它是用户自己画的，和笔记同性质。
+   * 代价是恢复一份**旧备份**（v1 里没有 symbols）会把现有符号清空——
+   * 这是覆盖式恢复的应有之义，而且 `counts.symbols` 会让设置页的确认框
+   * 把它显示出来（「符号库 12 个 → 0 个」），**丢什么要让用户看见**。
    */
   async replaceAll(backup: BackupFile, attachments: Attachment[]): Promise<void> {
     await db.transaction(
       'rw',
-      [db.subjects, db.chapters, db.notes, db.attachments],
+      [db.subjects, db.chapters, db.notes, db.attachments, db.symbols],
       async () => {
         await Promise.all([
           db.subjects.clear(),
           db.chapters.clear(),
           db.notes.clear(),
           db.attachments.clear(),
+          db.symbols.clear(),
         ])
 
         if (backup.subjects.length) await db.subjects.bulkAdd(backup.subjects)
         if (backup.chapters.length) await db.chapters.bulkAdd(backup.chapters)
         if (backup.notes.length) await db.notes.bulkAdd(backup.notes)
         if (attachments.length) await db.attachments.bulkAdd(attachments)
+        if (backup.symbols?.length) await db.symbols.bulkAdd(backup.symbols)
       },
     )
   },

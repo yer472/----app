@@ -233,7 +233,7 @@ export function SettingsPage() {
       downloadBlob(blob, archiveFileName())
       setNotice({
         tone: 'ok',
-        text: `已导出 ${counts.subjects} 个科目、${counts.chapters} 个章节、${counts.notes} 篇笔记、${counts.attachments} 张图片，共 ${formatBytes(blob.size)}。浏览器应该已经开始下载了，检查一下下载文件夹。`,
+        text: `已导出 ${counts.subjects} 个科目、${counts.chapters} 个章节、${counts.notes} 篇笔记、${counts.attachments} 张图片、${counts.symbols} 个自定义符号，共 ${formatBytes(blob.size)}。浏览器应该已经开始下载了，检查一下下载文件夹。`,
       })
     } catch (error) {
       setNotice({
@@ -289,6 +289,7 @@ export function SettingsPage() {
       const parts = [
         `已恢复 ${pending.backup.subjects.length} 个科目、${pending.backup.chapters.length} 个章节、${pending.backup.notes.length} 篇笔记`,
         `${pending.attachments.length} 张图片`,
+        `${pending.backup.symbols?.length ?? 0} 个自定义符号`,
       ]
       if (pending.missingImages.length > 0) {
         parts.push(`有 ${pending.missingImages.length} 张图片在备份里没找到，未能恢复`)
@@ -750,7 +751,8 @@ export function SettingsPage() {
               现在的 {currentCounts?.subjects ?? 0} 个科目、
               {currentCounts?.chapters ?? 0} 个章节、
               {currentCounts?.notes ?? 0} 篇笔记、
-              {currentCounts?.attachments ?? 0} 张图片会被
+              {currentCounts?.attachments ?? 0} 张图片、
+              {currentCounts?.symbols ?? 0} 个自定义符号会被
               <strong className="font-medium">永久删除</strong>，无法撤销。
             </div>
 

@@ -1,17 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { refreshAssetImages, toAssetUrl } from '@/lib/asset'
 import { cn } from '@/lib/cn'
 import { useOverlay } from '@/lib/shortcuts/overlay'
-import { AttachmentRepository } from '@/repository'
-import type { Attachment, ID } from '@/types/models'
+import { AttachmentRepository, SymbolRepository } from '@/repository'
+import type { Attachment, CustomSymbol, ID } from '@/types/models'
 import { BoardCanvas } from './BoardCanvas'
-import { removeShapes, type Scene } from './scene'
+import { createScene, removeShapes, type Scene } from './scene'
+import { defOfCustomSymbol } from './render'
 import { readSceneFromBlob, sceneToSvgBlob } from './serialize'
-import { HOTKEY_TO_TOOL, TOOLS, TOOL_ICONS, type ToolKind } from './tools'
+import { POINT_SYMBOLS, type PointSymbolDef } from './symbols'
+import { SymbolEditor, type SymbolDraft } from './SymbolEditor'
+import { SymbolPanel } from './SymbolPanel'
+import { HOTKEY_TO_TOOL, TOOLS, TOOL_ICONS, type Tool } from './tools'
 import { useSceneHistory } from './useHistory'
+
+/** 稳定的空数组。见下面 customs 的注释 */
+const NO_CUSTOMS: CustomSymbol[] = []
 
 interface DrawBoardProps {
   noteId: ID
@@ -45,15 +53,53 @@ export function DrawBoard({
   onInsert,
   onDirtyChange,
 }: DrawBoardProps) {
-  const [tool, setTool] = useState<ToolKind>('line')
+  const [tool, setTool] = useState<Tool>({ kind: 'line' })
   const [snap, setSnap] = useState(true)
   const [selectedId, setSelectedId] = useState<ID | null>(null)
   const [caption, setCaption] = useState('')
   const [loading, setLoading] = useState(attachment !== null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * 附件存在但**读不出来**。
+   *
+   * 这个标记存在的唯一理由是挡住保存。原来读失败只 `setError(...)`，
+   * 而 `handleSave` 完全不看 `error`，照样把当前的（空）场景写成新附件——
+   * 也就是说「打开一张读不出来的图 → 点完成」会**用一张白纸永久顶掉原图**，
+   * 而且历史里没有原 SVG 可退。
+   *
+   * 以前要手工改坏 SVG 才能碰到，所以一直没被发现；场景格式升到 2 之后，
+   * 一个还开着旧版 JS 的标签页（PWA 更新后旧标签页不会自刷新）就能走到
+   * 「新图在旧版里读不出来」这条路。
+   */
+  const [sceneUnavailable, setSceneUnavailable] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [confirmingClose, setConfirmingClose] = useState(false)
+  /** 绘制过程中的长度/角度读数，显示在页脚 */
+  const [measure, setMeasure] = useState<string | null>(null)
+  /** 一次性提示（比如「这个铰链固定在机架上」），显示在页脚 */
+  const [notice, setNotice] = useState<string | null>(null)
+  /** 符号编辑层开着。editingSymbol 为 null 表示在画新符号 */
+  const [symbolEditorOpen, setSymbolEditorOpen] = useState(false)
+  const [editingSymbol, setEditingSymbol] = useState<CustomSymbol | null>(null)
+  const [deletingSymbol, setDeletingSymbol] = useState<CustomSymbol | null>(null)
+
+  // 空数组要用一个**稳定**的常量：`?? []` 每次渲染都造一个新数组，
+  // 会让下面那个 useMemo 每帧都重算
+  const customs = useLiveQuery(() => SymbolRepository.list(), []) ?? NO_CUSTOMS
+
+  /**
+   * 可放置的点符号：内置的 + 自己画的。
+   *
+   * 两者用同一个形状（`PointSymbolDef`），所以面板、预览、往场景里内联
+   * 走的是同一条路，不需要为「自定义」再分一套分支。
+   */
+  const library = useMemo<Record<string, PointSymbolDef>>(() => {
+    const map: Record<string, PointSymbolDef> = {}
+    for (const def of POINT_SYMBOLS) map[def.id] = def
+    for (const symbol of customs) map[symbol.id] = defOfCustomSymbol(symbol)
+    return map
+  }, [customs])
 
   // 登记成浮层：全局快捷键层据此整体让位。
   // 下面那个 stopPropagation 其实已经挡住了 window 上的监听器，
@@ -71,11 +117,7 @@ export function DrawBoard({
     canUndo,
     canRedo,
     reset,
-  } = useSceneHistory(() => ({
-    width: 1200,
-    height: 900,
-    shapes: [],
-  }) as Scene)
+  } = useSceneHistory(createScene)
 
   const commit = useCallback(
     (next: Scene) => {
@@ -87,7 +129,9 @@ export function DrawBoard({
 
   // 打开已有的图时把场景读回来。
   // 这一层失败要显示出来——图可能是旧版本存的、也可能被外部工具改过，
-  // 静默给一张白纸会让用户以为自己的图丢了
+  // 静默给一张白纸会让用户以为自己的图丢了。
+  // 更要紧的是置上 sceneUnavailable：读不出来时**连保存一起挡掉**，
+  // 不然「点一下完成」就把原图换成这张白纸了。
   useEffect(() => {
     if (!attachment) return
     let cancelled = false
@@ -96,6 +140,7 @@ export function DrawBoard({
       if (loaded) {
         reset(loaded)
       } else {
+        setSceneUnavailable(true)
         setError('这张图读不出来了。它可能是更早的版本存的。')
       }
       setLoading(false)
@@ -129,6 +174,10 @@ export function DrawBoard({
    * 编辑完再插一次的话，同一张图会在笔记里出现两遍。
    */
   const handleSave = async () => {
+    // 读不出来的图绝不能保存：当前场景是空的，写下去就是用白纸顶掉原图。
+    // 按钮那边也置灰了，这里是第二道保险（比如回车触发的提交）
+    if (sceneUnavailable) return
+
     setSaving(true)
     setError(null)
     try {
@@ -163,6 +212,22 @@ export function DrawBoard({
     }
   }
 
+  /** 把焦点还给画板容器。符号编辑层关掉之后必须做，否则单键快捷键全部失效 */
+  const focusBoard = () => {
+    containerRef.current?.focus()
+  }
+
+  const handleSaveSymbol = (draft: SymbolDraft) => {
+    const run = async () => {
+      if (editingSymbol) await SymbolRepository.update(editingSymbol.id, draft)
+      else await SymbolRepository.create(draft)
+      setSymbolEditorOpen(false)
+      setEditingSymbol(null)
+      focusBoard()
+    }
+    void run()
+  }
+
   const requestClose = () => {
     if (dirty) {
       setConfirmingClose(true)
@@ -185,14 +250,37 @@ export function DrawBoard({
     //「放弃这次改动？」确认框按 Esc 就关不掉了。
     event.stopPropagation()
 
+    /*
+     * 符号编辑层开着时，这一层的键盘处理整体让开。
+     *
+     * ⚠️ 这行必须在 `stopPropagation()` **之后**。React 的 portal 让事件沿
+     * **React 树**冒泡，而符号编辑层是这个容器的 React 子节点，所以它里面的
+     * 按键一定会到这里来。顺序写反的话（先 return 再 stop），在符号编辑器里
+     * 按 Ctrl+K 会一路导航走——未保存的符号和未保存的图一起丢。
+     */
+    if (symbolEditorOpen) return
+
     const target = event.target as HTMLElement
     const inField =
       target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
 
-    // Esc 归对话框管（见上）。没有对话框开着时才是「关画板」。
+    /*
+     * Esc 分两步：先撤掉手上那件事（上膛的符号 / 选中的图形），都没有了才关画板。
+     *
+     * 一次 Esc 就直接关画板会让人措手不及——「手滑点了个符号」的时候，
+     * 用户想撤的是那一下，不是整张图。代价是关画板要多按一次。
+     */
     if (event.key === 'Escape') {
       event.preventDefault()
       if (confirmingClose) return
+      if (tool.kind === 'symbol') {
+        setTool({ kind: 'select' })
+        return
+      }
+      if (selectedId) {
+        setSelectedId(null)
+        return
+      }
       requestClose()
       return
     }
@@ -232,7 +320,7 @@ export function DrawBoard({
     const nextTool = HOTKEY_TO_TOOL.get(key)
     if (nextTool) {
       event.preventDefault()
-      setTool(nextTool)
+      setTool({ kind: nextTool })
       // 换工具就取消选中，否则选中框会一直挂在图上，
       // 让人以为新工具会画到那个图上面去
       setSelectedId(null)
@@ -259,14 +347,14 @@ export function DrawBoard({
             key={spec.kind}
             type="button"
             onClick={() => {
-              setTool(spec.kind)
+              setTool({ kind: spec.kind })
               setSelectedId(null)
             }}
             title={`${spec.label}（${spec.hotkey.toUpperCase()}）`}
-            aria-pressed={tool === spec.kind}
+            aria-pressed={tool.kind === spec.kind}
             className={cn(
               'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors',
-              tool === spec.kind
+              tool.kind === spec.kind
                 ? 'bg-blue-600 text-white'
                 : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800',
             )}
@@ -323,7 +411,16 @@ export function DrawBoard({
           <Button variant="secondary" onClick={requestClose}>
             取消
           </Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>
+          <Button
+            variant="primary"
+            onClick={handleSave}
+            disabled={saving || sceneUnavailable}
+            title={
+              sceneUnavailable
+                ? '这张图读不出来，保存会把它覆盖掉，所以先禁用了'
+                : undefined
+            }
+          >
             {saving ? '保存中…' : '完成'}
           </Button>
         </div>
@@ -335,31 +432,108 @@ export function DrawBoard({
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 p-4">
+      <div className="flex min-h-0 flex-1">
+        {!loading && !sceneUnavailable ? (
+          <SymbolPanel
+            armed={tool.kind === 'symbol' ? tool.ref : null}
+            onArm={(ref) => {
+              setTool({ kind: 'symbol', ref })
+              setSelectedId(null)
+            }}
+            customs={customs}
+            customDefs={library}
+            onNewCustom={() => {
+              setEditingSymbol(null)
+              setSymbolEditorOpen(true)
+            }}
+            onEditCustom={(symbol) => {
+              setEditingSymbol(symbol)
+              setSymbolEditorOpen(true)
+            }}
+            onDeleteCustom={setDeletingSymbol}
+          />
+        ) : null}
+
+        <div className="min-h-0 flex-1 p-4">
         {loading ? (
           <div className="flex h-full items-center justify-center text-sm text-neutral-400">
             正在打开这张图…
+          </div>
+        ) : sceneUnavailable ? (
+          // 读不出来就不给画：画了也存不下去（完成按钮禁用），
+          // 让人白画一通比直接说清楚更糟。取消出去，正文里那张图原样不动。
+          <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg bg-white text-center ring-1 ring-neutral-200 dark:bg-neutral-900 dark:ring-neutral-800">
+            <div className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+              这张图读不出来了
+            </div>
+            <div className="max-w-sm text-xs text-neutral-400 dark:text-neutral-500">
+              它可能是更早的版本存的，或者被外部工具改过。为了不覆盖掉它，
+              这里已经禁用了保存——正文里那张图还是原样，没有动过。
+            </div>
           </div>
         ) : (
           <div className="h-full overflow-hidden rounded-lg ring-1 ring-neutral-200 dark:ring-neutral-800">
             <BoardCanvas
               scene={scene}
               tool={tool}
+              library={library}
               snap={snap}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onLive={setLive}
               onCommit={commit}
+              onMeasure={setMeasure}
+              onNotice={setNotice}
             />
           </div>
         )}
+        </div>
       </div>
 
-      <footer className="shrink-0 border-t border-neutral-200 bg-white px-4 py-1.5 text-xs text-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-500">
-        {tool === 'select'
-          ? '点选图元可拖动，Delete 删除 · Ctrl+Z 撤销'
-          : '按住左键拖动绘制 · Shift 暂时无法约束角度（待做）· 换工具按快捷键'}
+      <footer className="flex shrink-0 items-center gap-3 border-t border-neutral-200 bg-white px-4 py-1.5 text-xs text-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-500">
+        <span>
+          {tool.kind === 'select'
+            ? selectedId
+              ? '拖动图形本身是平移 · 拖端点手柄只动那一个点 · Delete 删除'
+              : '点选图元可拖动，Delete 删除 · Ctrl+Z 撤销'
+            : tool.kind === 'eraser'
+              ? '点一下或按住拖动，划过的图元整块擦掉 · 松手才真删，撤销一次全回来'
+              : tool.kind === 'symbol'
+                ? '在图上点一下放下（带杆的符号按住拖动）· 放下后拖蓝色手柄改方向 · Esc 取消'
+                : '按住左键拖动绘制 · 端点会自动吸住 · 按住 Shift 约束角度 · 换工具按快捷键'}
+        </span>
+        {notice ? (
+          <span className="ml-auto text-amber-600 dark:text-amber-400">{notice}</span>
+        ) : measure ? (
+          <span className="ml-auto tabular-nums text-neutral-600 dark:text-neutral-300">
+            {measure}
+          </span>
+        ) : null}
       </footer>
+
+      {symbolEditorOpen ? (
+        <SymbolEditor
+          editing={editingSymbol}
+          onCancel={() => {
+            setSymbolEditorOpen(false)
+            setEditingSymbol(null)
+            focusBoard()
+          }}
+          onSave={handleSaveSymbol}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={deletingSymbol !== null}
+        title="删除这个符号？"
+        message={`「${deletingSymbol?.name ?? ''}」会从面板里消失。已经画好的图不受影响——每张图里都存着自己那一份定义。`}
+        confirmText="删除"
+        onConfirm={() => {
+          if (deletingSymbol) void SymbolRepository.remove(deletingSymbol.id)
+          setDeletingSymbol(null)
+        }}
+        onCancel={() => setDeletingSymbol(null)}
+      />
 
       <ConfirmDialog
         open={confirmingClose}

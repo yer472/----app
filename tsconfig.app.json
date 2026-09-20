@@ -26,7 +26,13 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    /* 一个「有返回值」的 switch 漏写 case 时会静默返回 undefined，
+       而这类漏写在画板里后果特别隐蔽：命中测试返回 undefined 的表现是
+       「新图形选不中」，导出函数返回 undefined 的表现是
+       「正文里的图少了那个图形、metadata 里却完好」。
+       开了这条，编译器会直接把漏掉的路径指出来。 */
+    "noImplicitReturns": true
   },
   "include": ["src"]
 }
