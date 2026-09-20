@@ -35,21 +35,36 @@ export interface ToolSpec {
 }
 
 /**
- * 工具栏的顺序也是给用户看的顺序：先选择，再按「从简单到复杂」排图元，
+ * 工具表。**写成 `Record<ToolKind, ToolSpec>` 而不是数组**（原来就是数组）。
+ *
+ * 数组的话，「往 `ToolKind` 里加了一种工具、却忘了在工具栏上给它一个按钮」
+ * 是**静默**的：类型系统知道它、`draftFor` 必须处理它、`TOOL_ICONS` 逼你起个
+ * 名字——但它不在那张列表里，于是用户永远看不到它，而没有任何一处报错。
+ * 换成 Record 之后，漏一个键就是编译错误。
+ *
+ * 声明顺序也是工具栏里给用户看的顺序：先选择，再按「从简单到复杂」排图元，
  * 橡皮放最后（它是「删」不是「画」，混在图元中间会让人误选）。
  *
  * 图标用 Unicode 字符而不是 SVG，和项目里 `⌕ ◐ ⚙ ◎` 那套保持一致。
  * 机构符号面板里的缩略图是真正的矢量图形——那会是这个项目第一次引入
  * 内联 SVG「图标」，届时要单独记一笔。
  */
-export const TOOLS: ToolSpec[] = [
-  { kind: 'select', label: '选择', hotkey: 'v' },
-  { kind: 'line', label: '直线', hotkey: 'l' },
-  { kind: 'rect', label: '矩形', hotkey: 'r' },
-  { kind: 'ellipse', label: '椭圆', hotkey: 'o' },
-  { kind: 'pencil', label: '手绘', hotkey: 'p' },
-  { kind: 'eraser', label: '橡皮', hotkey: 'e' },
-]
+export const TOOLS: Record<ToolKind, ToolSpec> = {
+  select: { kind: 'select', label: '选择', hotkey: 'v' },
+  line: { kind: 'line', label: '直线', hotkey: 'l' },
+  rect: { kind: 'rect', label: '矩形', hotkey: 'r' },
+  ellipse: { kind: 'ellipse', label: '椭圆', hotkey: 'o' },
+  pencil: { kind: 'pencil', label: '手绘', hotkey: 'p' },
+  eraser: { kind: 'eraser', label: '橡皮', hotkey: 'e' },
+}
+
+/**
+ * 按声明顺序排好的工具。
+ *
+ * 顺序的出处只有 `TOOLS` 的声明顺序一处：对象的字符串键按插入顺序遍历，
+ * 这是规范保证的，所以这里不需要再抄一份顺序数组（抄一份就是两处会漂移的约定）。
+ */
+export const TOOL_LIST: readonly ToolSpec[] = Object.values(TOOLS)
 
 export const TOOL_ICONS: Record<ToolKind, string> = {
   select: '↖',
@@ -67,5 +82,5 @@ export const TOOL_ICONS: Record<ToolKind, string> = {
  * 不排除的话 `Shift+V` 会在用户想画一条竖直线的时候把工具换成选择。
  */
 export const HOTKEY_TO_TOOL = new Map<string, ToolKind>(
-  TOOLS.map((t) => [t.hotkey, t.kind]),
+  TOOL_LIST.map((t) => [t.hotkey, t.kind]),
 )

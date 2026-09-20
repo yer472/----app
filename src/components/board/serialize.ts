@@ -6,14 +6,15 @@ import {
   SVG_NS,
 } from './render'
 import {
+  contextOf,
   pruneDefs,
   type Point,
   type Scene,
-  type SceneDefs,
+  type SceneContext,
   type Shape,
   type ShapeKind,
 } from './scene'
-import type { PointSymbolDef } from './symbols'
+import type { PartKind, PointSymbolDef } from './symbols'
 
 /**
  * 场景 ↔ SVG 的相互转换。
@@ -92,8 +93,8 @@ interface ScenePayload {
  * 符号类图形的零件在**局部坐标**里，所以外面要套一个 `<g transform>`。
  * 那个变换由 `shapeToParts` 给出，和画布侧用的是同一个值。
  */
-function createShapeElements(shape: Shape, defs: SceneDefs): SVGElement[] {
-  const { transform, parts } = shapeToParts(shape, defs)
+function createShapeElements(shape: Shape, ctx: SceneContext): SVGElement[] {
+  const { transform, parts } = shapeToParts(shape, ctx)
   const children = parts.map((part) => partToDom(part))
   if (!transform) return children
 
@@ -152,8 +153,11 @@ export function sceneToSvgElement(input: Scene): SVGSVGElement {
   // 一个图形可能展开成多个元素（将来的符号就是），所以逐个 append 而不是
   // 一个图形一个元素。**画布侧的主 <g> 也是这个结构**，两边的元素顺序
   // 一一对应，自检脚本会逐属性对拍。
+  // 索引建在**上面那次 prune 之后**的场景上：被清掉的孤儿定义不该出现在
+  // 上下文里，而被清掉的东西里也没有图元，所以两者是一致的
+  const ctx = contextOf(scene)
   for (const shape of scene.shapes) {
-    for (const el of createShapeElements(shape, scene.defs)) group.appendChild(el)
+    for (const el of createShapeElements(shape, ctx)) group.appendChild(el)
   }
   svg.appendChild(group)
 
@@ -225,19 +229,29 @@ function isScene(value: unknown): value is Scene {
   if (typeof s.width !== 'number' || typeof s.height !== 'number') return false
   if (!Array.isArray(s.shapes)) return false
   if (s.defs !== undefined && !isDefs(s.defs)) return false
-  if (!s.shapes.every(isShape)) return false
 
   /*
-   * 每个点符号的 ref 都要能解析到定义，否则这张图是坏的。
+   * 场景级的校验上下文。
+   *
+   * 「每个点符号的 ref 都要能解析到定义」这条规矩**折进了 `SHAPE_VALIDATORS`**，
+   * 而不是在这里另写一句 `every(...)`：原来那句是个三元表达式，而三元表达式
+   * 恰恰是穷尽性检查最容易漏的地方——「加一种图形要交代哪些场景级的事」会
+   * 散在几个互不相干的表达式里。现在只有一张表，漏了就是编译错误。
    *
    * 注意**不要**在这一步去查内置符号库（symbols.ts）：判定的依据只有
    * 「场景里有没有这份定义」。内联是刻意的——标准库以后改了图形，老图
    * 也不该跟着变形；如果这里允许回退到内置库，那条承诺就没了。
+   *
+   * id 只收字符串：这时候场景还没验完，`s.shapes` 里可能是任何东西。
    */
-  const defs = s.defs ?? {}
-  return s.shapes.every((shape) =>
-    shape.kind === 'symbol' ? defs[shape.ref] !== undefined : true,
-  )
+  const ids = new Set<string>()
+  for (const shape of s.shapes) {
+    const id = (shape as { id?: unknown }).id
+    if (typeof id === 'string') ids.add(id)
+  }
+
+  const ctx: ShapeCheckContext = { defs: s.defs ?? {}, ids }
+  return s.shapes.every((shape) => isShape(shape, ctx))
 }
 
 function isPoint(value: unknown): value is Point {
@@ -245,6 +259,22 @@ function isPoint(value: unknown): value is Point {
   const p = value as Partial<Point>
   return typeof p.x === 'number' && typeof p.y === 'number'
 }
+
+/**
+ * 校验一条图形时能看到的**场景级**信息。
+ *
+ * 有些图形光看自己不够：点符号要知道它引用的定义在不在场景里，流向要知道
+ * 它两端的模块还在不在。这类规则也放进下面那张表（见 isScene 的注释）。
+ */
+interface ShapeCheckContext {
+  /** 场景里内联的点符号定义 */
+  defs: Record<string, PointSymbolDef>
+  /** 场景里出现过的图形 id */
+  ids: ReadonlySet<string>
+}
+
+/** 一条图形自己的字段校验器 */
+type ShapeValidator = (s: Record<string, unknown>, ctx: ShapeCheckContext) => boolean
 
 /**
  * 每种图形自己的字段校验。
@@ -256,55 +286,65 @@ function isPoint(value: unknown): value is Point {
  *
  * 写成映射类型就反过来了：加了 kind 不在这里补一行，就是编译错误。
  */
-const SHAPE_VALIDATORS: {
-  [K in ShapeKind]: (s: Record<string, unknown>) => boolean
-} = {
+const SHAPE_VALIDATORS: { [K in ShapeKind]: ShapeValidator } = {
   line: (s) => isPoint(s.a) && isPoint(s.b),
   rect: (s) => isPoint(s.a) && isPoint(s.b),
   ellipse: (s) => isPoint(s.a) && isPoint(s.b),
   pencil: (s) => Array.isArray(s.points) && s.points.every(isPoint),
-  symbol: (s) =>
+  symbol: (s, ctx) =>
     typeof s.ref === 'string' &&
     s.ref.length > 0 &&
     isPoint(s.at) &&
     typeof s.rotation === 'number' &&
-    Number.isFinite(s.rotation),
+    Number.isFinite(s.rotation) &&
+    ctx.defs[s.ref] !== undefined,
   link: (s) => typeof s.ref === 'string' && s.ref.length > 0 && isPoint(s.a) && isPoint(s.b),
 }
 
-const VALIDATOR_BY_KIND = new Map<string, (s: Record<string, unknown>) => boolean>(
+const VALIDATOR_BY_KIND = new Map<string, ShapeValidator>(
   Object.entries(SHAPE_VALIDATORS),
 )
 
-function isShape(value: unknown): value is Shape {
+function isShape(value: unknown, ctx: ShapeCheckContext): value is Shape {
   if (typeof value !== 'object' || value === null) return false
   const s = value as Record<string, unknown>
   if (typeof s.id !== 'string') return false
   if (typeof s.kind !== 'string') return false
   const validate = VALIDATOR_BY_KIND.get(s.kind)
-  return validate ? validate(s) : false
+  return validate ? validate(s, ctx) : false
 }
 
-const PART_KINDS = new Set(['line', 'polyline', 'rect', 'ellipse', 'text'])
+/**
+ * 每种零件自己的字段校验。
+ *
+ * 和 `SHAPE_VALIDATORS` 同一个道理、同一种写法。原来这里是
+ * `PART_KINDS = new Set([...])` 配一个 `switch` 的 `default: return false`——
+ * **两处都是静默的**：往 `Part` 联合里加一种零件，两边都不报错。而后果比图形
+ * 那边更绕：零件只随自定义符号的定义进场景（`defs[x].parts`），所以一种没登记的
+ * 零件会让 `isDefs` 判假 → `isScene` 判假 → 整张图「读不出来了」，
+ * 连保存一起被禁用（见 DrawBoard 的 `sceneUnavailable`）。
+ */
+const PART_VALIDATORS: {
+  [K in PartKind]: (p: Record<string, unknown>) => boolean
+} = {
+  line: (p) => isPoint(p.a) && isPoint(p.b),
+  polyline: (p) => Array.isArray(p.points) && p.points.every(isPoint),
+  rect: (p) => isPoint(p.a) && isPoint(p.b),
+  ellipse: (p) => isPoint(p.a) && isPoint(p.b),
+  text: (p) =>
+    isPoint(p.at) && typeof p.text === 'string' && typeof p.size === 'number',
+}
 
 function isPart(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
   const part = value as Record<string, unknown>
-  if (typeof part.kind !== 'string' || !PART_KINDS.has(part.kind)) return false
+  if (typeof part.kind !== 'string') return false
   if (part.w !== undefined && typeof part.w !== 'number') return false
-
-  switch (part.kind) {
-    case 'line':
-    case 'rect':
-    case 'ellipse':
-      return isPoint(part.a) && isPoint(part.b)
-    case 'polyline':
-      return Array.isArray(part.points) && part.points.every(isPoint)
-    case 'text':
-      return isPoint(part.at) && typeof part.text === 'string' && typeof part.size === 'number'
-    default:
-      return false
-  }
+  // 查不到校验器说明这压根不是一种零件（数据可能被外部工具改过），
+  // 和「校验不过」同样处理
+  const validate: ((p: Record<string, unknown>) => boolean) | undefined =
+    PART_VALIDATORS[part.kind as PartKind]
+  return validate ? validate(part) : false
 }
 
 /**

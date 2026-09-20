@@ -54,6 +54,14 @@ export type Part =
   | { kind: 'ellipse'; a: Point; b: Point; w?: number }
   | { kind: 'text'; at: Point; text: string; size: number }
 
+/**
+ * 零件的种类。
+ *
+ * 单独立一个类型是为了让「按种类穷尽」的写法能成立——`serialize.ts` 的
+ * `PART_VALIDATORS` 就是一整张 `Record<PartKind, …>`，漏一种零件是编译错误。
+ */
+export type PartKind = Part['kind']
+
 /** 面板里的分组。和快捷键目录一样，另给一张表管顺序和标题 */
 export type SymbolGroup = 'joint' | 'member' | 'drive' | 'driven' | 'source'
 
@@ -431,8 +439,6 @@ export function hitsPart(part: Part, p: Point, tolerance: number): boolean {
         p.y <= part.at.y + slack
       )
     }
-    default:
-      return false
   }
 }
 
@@ -482,34 +488,13 @@ export function partsBounds(
   let maxX = -Infinity
   let maxY = -Infinity
 
-  const include = (point: Point) => {
-    minX = Math.min(minX, point.x)
-    minY = Math.min(minY, point.y)
-    maxX = Math.max(maxX, point.x)
-    maxY = Math.max(maxY, point.y)
-  }
-
   for (const part of parts) {
-    switch (part.kind) {
-      case 'line':
-        include(part.a)
-        include(part.b)
-        break
-      case 'polyline':
-        part.points.forEach(include)
-        break
-      case 'rect':
-      case 'ellipse':
-        include(part.a)
-        include(part.b)
-        break
-      case 'text':
-        include({ x: part.at.x, y: part.at.y - part.size })
-        include({ x: part.at.x + part.text.length * part.size * 0.62, y: part.at.y })
-        break
-      default:
-        break
-    }
+    const box = partBounds(part)
+    if (!box) continue
+    minX = Math.min(minX, box.minX)
+    minY = Math.min(minY, box.minY)
+    maxX = Math.max(maxX, box.maxX)
+    maxY = Math.max(maxY, box.maxY)
   }
 
   if (!Number.isFinite(minX)) return { x: -padding, y: -padding, w: padding * 2, h: padding * 2 }
@@ -518,5 +503,63 @@ export function partsBounds(
     y: minY - padding,
     w: maxX - minX + padding * 2,
     h: maxY - minY + padding * 2,
+  }
+}
+
+interface Box {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
+/**
+ * 一个零件占的地方。什么都没有（空的折线）时返回 null。
+ *
+ * **每个分支都必须 return，且这里不写 `default`。** `tsconfig` 开了
+ * `noImplicitReturns`：往 `Part` 联合里加一种零件而漏了这个 switch，
+ * 编译器会直接报「不是所有代码路径都有返回值」。
+ *
+ * 原来这段是内联在 `partsBounds` 的循环里、以一个 `default: break` 收尾的，
+ * 而 `break` 之后函数照常在循环外 return——漏一种零件的表现是
+ * 「面板缩略图把它裁掉了」，不报任何错。`hitsPart` 同理（它原来也有一个
+ * `default: return false`，后果是那个零件在图上点不中）。
+ *
+ * 这两个地方**故意不用 `assertNever`**：它在 scene.ts 里，而这个文件引
+ * scene.ts 的值会构成真正的运行期循环（见下面 `distancePointToSegment`
+ * 的注释）。靠 `noImplicitReturns` 就够，不需要再引一个值进来。
+ */
+function partBounds(part: Part): Box | null {
+  switch (part.kind) {
+    case 'line':
+    case 'rect':
+    case 'ellipse': {
+      const r = boxOf(part.a, part.b)
+      return { minX: r.minX, minY: r.minY, maxX: r.maxX, maxY: r.maxY }
+    }
+    case 'polyline': {
+      if (part.points.length === 0) return null
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const point of part.points) {
+        minX = Math.min(minX, point.x)
+        minY = Math.min(minY, point.y)
+        maxX = Math.max(maxX, point.x)
+        maxY = Math.max(maxY, point.y)
+      }
+      return { minX, minY, maxX, maxY }
+    }
+    case 'text': {
+      // 文字外框和 `hitsPart` 用同一套估算，两处必须一致：不一样的话会
+      // 出现「缩略图裁掉了，但图上点得中」这种自相矛盾的表现
+      return {
+        minX: part.at.x,
+        minY: part.at.y - part.size,
+        maxX: part.at.x + part.text.length * part.size * 0.62,
+        maxY: part.at.y,
+      }
+    }
   }
 }

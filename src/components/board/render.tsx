@@ -1,6 +1,12 @@
 import type { ReactElement } from 'react'
 import type { CustomSymbol } from '@/types/models'
-import { assertNever, type Point, type SceneDefs, type Shape } from './scene'
+import {
+  EMPTY_CONTEXT,
+  assertNever,
+  type Point,
+  type SceneContext,
+  type Shape,
+} from './scene'
 import {
   builtInPointDef,
   linkDef,
@@ -81,11 +87,13 @@ function num(value: number): string {
 /**
  * 图形 → 零件列表。**全项目只有这一处把图形翻译成几何。**
  *
- * 点符号的定义从 `defs` 里取（内联在场景里），两点符号的定义从 symbols.ts 取
- * （代码里的生成器）。两者的定义都查不到时不是「什么都不画」而是画一个占位：
- * 图形本身还在场景里、还能被选中和删掉，静默不画会让人以为它没了。
+ * 点符号的定义从 `ctx.defs` 里取（内联在场景里），两点符号的定义从 symbols.ts
+ * 取（代码里的生成器）。两者的定义都查不到时不是「什么都不画」而是画一个
+ * 占位：图形本身还在场景里、还能被选中和删掉，静默不画会让人以为它没了。
+ *
+ * `ctx` 为什么是必填的（而不是 `defs` 那样可选）：见 `SceneContext` 的注释。
  */
-export function shapeToParts(shape: Shape, defs: SceneDefs): ShapeRender {
+export function shapeToParts(shape: Shape, ctx: SceneContext): ShapeRender {
   switch (shape.kind) {
     case 'line':
       return { transform: '', parts: [{ kind: 'line', a: shape.a, b: shape.b }] }
@@ -105,7 +113,7 @@ export function shapeToParts(shape: Shape, defs: SceneDefs): ShapeRender {
             : [{ kind: 'polyline', points: shape.points }],
       }
     case 'symbol': {
-      const def = defs?.[shape.ref] ?? builtInPointDef(shape.ref)
+      const def = ctx.defs?.[shape.ref] ?? builtInPointDef(shape.ref)
       const transform = `translate(${num(shape.at.x)},${num(shape.at.y)}) rotate(${num(shape.rotation)})`
       if (!def) return { transform, parts: placeholderAtOrigin() }
       return { transform, parts: [...def.parts] }
@@ -147,7 +155,7 @@ export function defOfCustomSymbol(symbol: CustomSymbol): PointSymbolDef {
   return {
     id: symbol.id,
     name: symbol.name,
-    parts: symbol.shapes.flatMap((s) => shapeToParts(s, undefined).parts),
+    parts: symbol.shapes.flatMap((s) => shapeToParts(s, EMPTY_CONTEXT).parts),
     anchors: [{ name: 'origin', at: symbol.origin }],
   }
 }

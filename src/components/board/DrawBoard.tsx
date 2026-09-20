@@ -16,7 +16,7 @@ import { readSceneFromBlob, sceneToSvgBlob } from './serialize'
 import { POINT_SYMBOLS, type PointSymbolDef } from './symbols'
 import { SymbolEditor, type SymbolDraft } from './SymbolEditor'
 import { SymbolPanel } from './SymbolPanel'
-import { HOTKEY_TO_TOOL, TOOLS, TOOL_ICONS, type Tool } from './tools'
+import { HOTKEY_TO_TOOL, TOOL_ICONS, TOOL_LIST, type Tool } from './tools'
 import { useSceneHistory } from './useHistory'
 
 interface DrawBoardProps {
@@ -347,7 +347,7 @@ export function DrawBoard({
           {attachment ? '编辑图形' : '新建图形'}
         </span>
 
-        {TOOLS.map((spec) => (
+        {TOOL_LIST.map((spec) => (
           <button
             key={spec.kind}
             type="button"

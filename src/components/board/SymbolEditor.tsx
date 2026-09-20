@@ -5,7 +5,7 @@ import type { CustomSymbol, ID } from '@/types/models'
 import type { Point } from '@/types/scene'
 import { BoardCanvas } from './BoardCanvas'
 import { GRID_SIZE, createScene, removeShapes, type Scene } from './scene'
-import { TOOLS, TOOL_ICONS, type Tool, type ToolKind } from './tools'
+import { TOOL_ICONS, TOOL_LIST, type Tool, type ToolKind } from './tools'
 import { useSceneHistory } from './useHistory'
 import { cn } from '@/lib/cn'
 
@@ -30,11 +30,25 @@ const CANVAS = 320
 /** 插入点固定在画布正中：画个十字准星说明，省掉一整套「标锚点」的交互 */
 const ORIGIN: Point = { x: CANVAS / 2, y: CANVAS / 2 }
 
-/** 这一层只给这几个工具。少一个符号工具，就少一种递归的可能 */
-const EDITOR_TOOLS: ToolKind[] = ['select', 'line', 'rect', 'ellipse', 'pencil', 'eraser']
+/**
+ * 这一层只给这几个工具。少一个符号工具，就少一种递归的可能。
+ *
+ * 这是一份**白名单**，所以往 `ToolKind` 里加工具时它不动是**故意的**：
+ * 新工具默认进不了符号编辑器。模块和流向更是永远不该进来——符号的定义会被
+ * 摊平成一份零件表（`defOfCustomSymbol`），摊平之后就没有「场景」了，
+ * 流向的几何在上面的做法下从构造上就算不出来。
+ */
+const EDITOR_TOOLS: readonly ToolKind[] = [
+  'select',
+  'line',
+  'rect',
+  'ellipse',
+  'pencil',
+  'eraser',
+]
 
 const EDITOR_HOTKEYS = new Map<string, ToolKind>(
-  TOOLS.filter((t) => EDITOR_TOOLS.includes(t.kind)).map((t) => [t.hotkey, t.kind]),
+  TOOL_LIST.filter((t) => EDITOR_TOOLS.includes(t.kind)).map((t) => [t.hotkey, t.kind]),
 )
 
 export interface SymbolDraft {
@@ -164,7 +178,7 @@ export function SymbolEditor({ editing, onCancel, onSave }: SymbolEditorProps) {
 
         <span className="mx-1 h-5 w-px bg-neutral-200 dark:bg-neutral-700" />
 
-        {TOOLS.filter((spec) => EDITOR_TOOLS.includes(spec.kind)).map((spec) => (
+        {TOOL_LIST.filter((spec) => EDITOR_TOOLS.includes(spec.kind)).map((spec) => (
           <button
             key={spec.kind}
             type="button"

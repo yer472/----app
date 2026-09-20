@@ -51,6 +51,46 @@ export interface Scene {
   defs?: Record<string, PointSymbolDef>
 }
 
+/**
+ * 跨图形上下文：**一个图形的几何可能需要知道别的图形在哪**。
+ *
+ * 今天只有流向用得上——它的两端是模块的 id，画到哪里去要按 id 查那两个模块
+ * 的位置。其它图形（直线、矩形、符号……）的几何只依赖自己，收下这个上下文
+ * 也用不着，所以只有真的要跨图形信息的两个函数收它：`shapeToParts`
+ * （算渲染几何）和 `hitsShape`（算命中）。
+ *
+ * ⚠️ **这两个函数的 `ctx` 是必填参数，不许改成可选。** 改成可选的话，
+ * 任何一个忘了传的调用点都会**在两个渲染器上同时静默地什么都不画**——
+ * 画布上少一块、导出的图里也少一块，两边都不报错。那正是当初把
+ * `ShapeView` 和 `createShapeElement` 合并成 `shapeToParts` 要消灭的那类故障
+ * （见 render.tsx 的文件头）。必填才会逼着每个调用点表态。
+ */
+export interface SceneContext {
+  /** 内联在场景里的点符号定义 */
+  defs: SceneDefs
+  /**
+   * 按 id 索引的全部图形。
+   *
+   * 装的是**整个场景**而不只是模块：这样将来任何一种「引用别的图形」的新
+   * 图形都能直接用，不用再动这个类型；查出来的东西是不是自己要的种类，
+   * 由用它的那个函数自己判（流向会检查它查到的两条都是不是 `node`）。
+   */
+  byId: ReadonlyMap<ID, Shape>
+}
+
+/** 收一次场景，供需要跨图形信息的地方用 */
+export function contextOf(scene: Scene): SceneContext {
+  return { defs: scene.defs, byId: new Map(scene.shapes.map((s) => [s.id, s])) }
+}
+
+/**
+ * 「没有别的图形可查」的空上下文。
+ *
+ * 自定义符号的图元用它：符号的定义被摊平成一份零件表存进场景，
+ * 之后就是**自成一体的局部坐标系**，跟画布上别的东西没有关系。
+ */
+export const EMPTY_CONTEXT: SceneContext = { defs: undefined, byId: new Map() }
+
 /** 图纸默认尺寸。4:3，够画一个四杆机构还有余量 */
 export const PAGE_WIDTH = 1200
 export const PAGE_HEIGHT = 900
@@ -331,14 +371,15 @@ function insideEllipse(p: Point, a: Point, b: Point, tolerance: number): boolean
 /**
  * 命中判定。
  *
- * `defs` 只有点符号用得上：把查询点**逆变换回符号的局部坐标系**，再按零件
- * 逐个测——这样命中逻辑不需要为每个符号写一份，加多少符号都一样。
+ * `ctx` 里两样东西各有用处：点符号要 `defs` 把查询点**逆变换回符号的局部
+ * 坐标系**再按零件逐个测（这样命中逻辑不需要为每个符号写一份，加多少符号
+ * 都一样）；流向要 `byId` 查它两端的模块在哪，才知道自己那条折线画到哪。
  */
 function hitsShape(
   shape: Shape,
   p: Point,
   tolerance: number,
-  defs: SceneDefs,
+  ctx: SceneContext,
 ): boolean {
   switch (shape.kind) {
     case 'line':
@@ -349,7 +390,7 @@ function hitsShape(
       return distanceToSegment(p, shape.a, shape.b) <= tolerance + JOINT_HIT_SLACK
     }
     case 'symbol': {
-      const def = defs?.[shape.ref]
+      const def = ctx.defs?.[shape.ref]
       // 定义丢了（老图引用了后来删掉的符号）时退化成「插入点附近能选中」，
       // 这样它至少还能被拖走或删掉，而不是变成一个选不中的幽灵
       if (!def) return Math.hypot(p.x - shape.at.x, p.y - shape.at.y) <= tolerance * 3
@@ -391,9 +432,10 @@ export function hitTest(
   p: Point,
   tolerance: number = HIT_TOLERANCE,
 ): Shape | null {
+  const ctx = contextOf(scene)
   for (let i = scene.shapes.length - 1; i >= 0; i -= 1) {
     const shape = scene.shapes[i]
-    if (shape && hitsShape(shape, p, tolerance, scene.defs)) return shape
+    if (shape && hitsShape(shape, p, tolerance, ctx)) return shape
   }
   return null
 }
@@ -409,9 +451,8 @@ export function hitTestAll(
   p: Point,
   tolerance: number = HIT_TOLERANCE,
 ): Shape[] {
-  return scene.shapes.filter((shape) =>
-    hitsShape(shape, p, tolerance, scene.defs),
-  )
+  const ctx = contextOf(scene)
+  return scene.shapes.filter((shape) => hitsShape(shape, p, tolerance, ctx))
 }
 
 // ---------------------------------------------------------------- 场景编辑

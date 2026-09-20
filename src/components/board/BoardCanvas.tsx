@@ -1,6 +1,7 @@
 import {
   Fragment,
   useId,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -15,6 +16,7 @@ import {
   collectSnapTargets,
   constrainToAngle,
   constrainToSquare,
+  contextOf,
   hitTest,
   hitTestAll,
   makeEllipse,
@@ -38,6 +40,7 @@ import {
   handlesOf,
   type Point,
   type Scene,
+  type SceneContext,
   type SceneDefs,
   type Shape,
 } from './scene'
@@ -530,6 +533,15 @@ export function BoardCanvas({
     ? (scene.shapes.find((s) => s.id === selectedId) ?? null)
     : null
 
+  /**
+   * 渲染用的跨图形上下文。
+   *
+   * `useMemo` 只能挡住「场景没变、只是选中态变了」这类重渲染；拖拽期间
+   * 每一帧 `scene` 都是新的，索引会跟着重建。那没关系——一次索引是 O(图元数)，
+   * 而这一帧本来就要把每个图元渲染一遍，量级相同。
+   */
+  const ctx = useMemo(() => contextOf(scene), [scene])
+
   return (
     <svg
       ref={svgRef}
@@ -589,9 +601,9 @@ export function BoardCanvas({
         strokeLinejoin="round"
       >
         {scene.shapes.map((shape) => (
-          <ShapeView key={shape.id} shape={shape} defs={scene.defs} />
+          <ShapeView key={shape.id} shape={shape} ctx={ctx} />
         ))}
-        {draft ? <ShapeView shape={draft} defs={scene.defs} /> : null}
+        {draft ? <ShapeView shape={draft} ctx={ctx} /> : null}
       </g>
 
       {/*
@@ -622,7 +634,7 @@ export function BoardCanvas({
               <ShapeView
                 key={s.id}
                 shape={s}
-                defs={scene.defs}
+                ctx={ctx}
                 style={{
                   stroke: ERASE_COLOR,
                   strokeWidth: STROKE_WIDTH + 6,
@@ -639,7 +651,7 @@ export function BoardCanvas({
               <ShapeView
                 key="selection"
                 shape={s}
-                defs={scene.defs}
+                ctx={ctx}
                 style={{
                   stroke: SELECT_COLOR,
                   strokeWidth: STROKE_WIDTH + 4,
@@ -716,14 +728,14 @@ function HandlesView({ shape, defs }: { shape: Shape; defs: SceneDefs }) {
  */
 function ShapeView({
   shape,
-  defs,
+  ctx,
   style,
 }: {
   shape: Shape
-  defs: SceneDefs
+  ctx: SceneContext
   style?: PartStyle
 }) {
-  const { transform, parts } = shapeToParts(shape, defs)
+  const { transform, parts } = shapeToParts(shape, ctx)
   const children = parts.map((part, index) => (
     <Fragment key={index}>{partToReact(part, style)}</Fragment>
   ))

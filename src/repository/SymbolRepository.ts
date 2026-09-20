@@ -2,6 +2,7 @@ import { db } from '@/db'
 import { newId } from '@/lib/id'
 import { now } from '@/lib/time'
 import type { CustomSymbol, ID, ISODateTime } from '@/types/models'
+import { SYMBOL_SHAPE_KINDS } from '@/types/scene'
 import type { Point, Shape } from '@/types/scene'
 
 /**
@@ -23,11 +24,14 @@ export interface CreateCustomSymbolInput {
   height: number
 }
 
-/** 编辑画布里允许出现的图元。放符号进去会形成递归，从数据层就挡掉 */
-const ALLOWED_KINDS = new Set(['line', 'rect', 'ellipse', 'pencil'])
-
+/**
+ * 编辑画布里允许出现的图元。放符号进去会形成递归，从数据层就挡掉。
+ *
+ * 名单本身在 `types/scene.ts` 里（`SYMBOL_SHAPE_KINDS`）——备份恢复那边
+ * 校验的是同一件事，两处必须一致，所以只有一份定义。
+ */
 function sanitizeShapes(shapes: Shape[]): Shape[] {
-  return shapes.filter((s) => ALLOWED_KINDS.has(s.kind))
+  return shapes.filter((s) => SYMBOL_SHAPE_KINDS[s.kind])
 }
 
 export const SymbolRepository = {
