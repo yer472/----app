@@ -62,12 +62,22 @@ export interface Note {
   updatedAt: ISODateTime
 }
 
-/** 附件：目前只有图片，正文里通过 asset://<id> 引用 */
+/**
+ * 附件的种类。
+ *
+ * `drawing` 是画板存出来的 SVG：可见的图元负责显示，场景数据内嵌在
+ * `<metadata>` 里负责「下次还能接着改」。它和普通图片走完全同一条管线——
+ * 正文里的引用、孤儿清理、三种备份都不区分种类。
+ */
+export type AttachmentType = 'image' | 'drawing'
+
+/** 附件：正文里通过 asset://<id> 引用 */
 export interface Attachment {
   id: ID
   noteId: ID
-  type: 'image'
-  /** 图片二进制数据。存 Blob 而不是 base64，避免体积膨胀 33% */
+  /** 不是 Dexie 索引，所以放宽取值不需要升级数据库版本 */
+  type: AttachmentType
+  /** 二进制数据。存 Blob 而不是 base64，避免体积膨胀 33% */
   blob: Blob
   mimeType: string
   width: number

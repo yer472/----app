@@ -1,7 +1,35 @@
 import { db } from '@/db'
 import { newId } from '@/lib/id'
 import { now } from '@/lib/time'
-import type { Attachment, ID } from '@/types/models'
+import type { Attachment, AttachmentType, ID } from '@/types/models'
+
+/** 和 createImage / createDrawing 共用的写入逻辑 */
+async function insert(input: {
+  noteId: ID
+  type: AttachmentType
+  blob: Blob
+  width: number
+  height: number
+}): Promise<Attachment> {
+  const attachment: Attachment = {
+    id: newId(),
+    noteId: input.noteId,
+    type: input.type,
+    blob: input.blob,
+    // blob.type 一般都有（Blob 构造时给了）；万一为空，兜底值要跟着类型走，
+    // 否则画板导出的图会被当成 jpeg，备份时的扩展名就错了
+    mimeType:
+      input.blob.type ||
+      (input.type === 'drawing' ? 'image/svg+xml' : 'image/jpeg'),
+    width: input.width,
+    height: input.height,
+    sizeBytes: input.blob.size,
+    createdAt: now(),
+  }
+
+  await db.attachments.add(attachment)
+  return attachment
+}
 
 export const AttachmentRepository = {
   async listByNote(noteId: ID): Promise<Attachment[]> {
@@ -25,20 +53,50 @@ export const AttachmentRepository = {
     width: number
     height: number
   }): Promise<Attachment> {
-    const attachment: Attachment = {
-      id: newId(),
-      noteId: input.noteId,
-      type: 'image',
+    return insert({ ...input, type: 'image' })
+  },
+
+  /**
+   * 存一张画板导出的图。
+   *
+   * 和 createImage 共用一张表、同一套 asset:// 引用；区别只有 type，
+   * 「图形」面板靠它把画板产出的图和粘贴的截图分开列出来。
+   */
+  async createDrawing(input: {
+    noteId: ID
+    blob: Blob
+    width: number
+    height: number
+  }): Promise<Attachment> {
+    return insert({ ...input, type: 'drawing' })
+  },
+
+  /**
+   * 覆盖一个已有附件的内容。
+   *
+   * 覆盖而不是新建，是为了让正文里的 `asset://<id>` 保持不变——
+   * 新建一条再改正文，意味着要去动编辑器文档，还得处理「旧的那条
+   * 什么时候变成孤儿」。
+   *
+   * ⚠️ 调用方必须在之后调用 `refreshAssetImages`。asset.ts 按附件 id
+   * 缓存了 blob URL，不刷新的话正文里显示的仍然是旧内容。
+   */
+  async replace(
+    id: ID,
+    input: { blob: Blob; width: number; height: number },
+  ): Promise<void> {
+    const existing = await db.attachments.get(id)
+    if (!existing) return
+
+    await db.attachments.update(id, {
       blob: input.blob,
-      mimeType: input.blob.type || 'image/jpeg',
+      // 保留原来的 mimeType 作为兜底：blob.type 为空时不能瞎猜，
+      // 猜错会让备份时的文件扩展名不对
+      mimeType: input.blob.type || existing.mimeType,
       width: input.width,
       height: input.height,
       sizeBytes: input.blob.size,
-      createdAt: now(),
-    }
-
-    await db.attachments.add(attachment)
-    return attachment
+    })
   },
 
   async remove(id: ID): Promise<void> {

@@ -24,6 +24,7 @@ import { hashString } from '@/lib/hash'
 import { formatDateTime } from '@/lib/time'
 import type {
   Attachment,
+  AttachmentType,
   Chapter,
   ID,
   ISODateTime,
@@ -60,7 +61,14 @@ export interface Snapshot {
 export interface BackupAttachmentMeta {
   id: ID
   noteId: ID
-  type: 'image'
+  /**
+   * 附件种类。导出时写的是真实值，导入时必须原样读回来。
+   *
+   * 这里曾经写死成 `type: 'image'`，导入侧也跟着写死——于是任何一种
+   * 新附件类型都会在「备份 → 恢复」一趟之后静默降级回图片：
+   * 导出正常、导入正常、数据库里看也正常，只是类型信息没了。
+   */
+  type: AttachmentType
   mimeType: string
   width: number
   height: number

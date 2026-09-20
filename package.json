@@ -9,6 +9,7 @@
     "icons": "node scripts/build-icons.mjs",
     "serve": "node scripts/serve.mjs",
     "verify:pwa": "node scripts/verify-pwa.mjs",
+    "verify:board": "node scripts/verify-board.mjs",
     "lint": "oxlint"
   },
   "dependencies": {

@@ -1,12 +1,24 @@
 import { useLiveQuery } from 'dexie-react-hooks'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { NoteEditor } from '@/components/editor/NoteEditor'
+import { DrawingPicker } from '@/components/board/DrawingPicker'
+import {
+  NoteEditor,
+  type NoteEditorHandle,
+} from '@/components/editor/NoteEditor'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { revokeAllAssetUrls } from '@/lib/asset'
 import { cn } from '@/lib/cn'
 import { scheduleAutoBackup } from '@/store/backupStore'
+import type { Attachment } from '@/types/models'
 import {
   AttachmentRepository,
   ChapterRepository,
@@ -16,6 +28,18 @@ import {
 
 /** 停止输入多久之后落盘 */
 const SAVE_DELAY_MS = 1000
+
+/**
+ * 画板按需加载。
+ *
+ * 翻笔记、看笔记的时候多数人不会画图，没理由让每次打开笔记
+ * 都多下一份画板的代码。理由和 router.tsx 里 Milkdown 的懒加载一样。
+ */
+const DrawBoard = lazy(() =>
+  import('@/components/board/DrawBoard').then((m) => ({
+    default: m.DrawBoard,
+  })),
+)
 
 type SaveStatus = 'idle' | 'unsaved' | 'saving' | 'saved'
 
@@ -39,6 +63,26 @@ export function NotePage() {
   const [content, setContent] = useState('')
   const [initialContent, setInitialContent] = useState<string | null>(null)
   const [status, setStatus] = useState<SaveStatus>('idle')
+
+  // 画板的状态。attachment 为 null 表示在画新的一张
+  const [boardOpen, setBoardOpen] = useState(false)
+  const [editingDrawing, setEditingDrawing] = useState<Attachment | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  // 画板里有没保存的改动。要和正文的脏标记一起进关页提示，
+  // 否则画了十分钟一关标签页就全没了
+  const [boardDirty, setBoardDirty] = useState(false)
+
+  const editorRef = useRef<NoteEditorHandle>(null)
+
+  // 本篇笔记里的图形。编辑之后会自动刷新——
+  // 走的是 Dexie 的 liveQuery，和笔记正文同一套响应式
+  const drawings = useLiveQuery(
+    async () => {
+      const all = await AttachmentRepository.listByNote(noteId)
+      return all.filter((a) => a.type === 'drawing')
+    },
+    [noteId],
+  )
 
   // 待落盘的正文 / 标题。为 null 表示没有未保存的改动
   const pendingContentRef = useRef<string | null>(null)
@@ -159,11 +203,11 @@ export function NotePage() {
       const titleDirty =
         pendingTitleRef.current !== null &&
         pendingTitleRef.current.trim() !== savedTitleRef.current
-      if (contentDirty || titleDirty) event.preventDefault()
+      if (contentDirty || titleDirty || boardDirty) event.preventDefault()
     }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [])
+  }, [boardDirty])
 
   if (note === undefined) {
     return (
@@ -234,6 +278,16 @@ export function NotePage() {
           />
 
           <div className="flex shrink-0 items-center gap-3 text-xs">
+            {/* 编辑器没就绪之前不能画：画完要插进正文，而插入要靠编辑器。
+                禁掉比让用户画完发现插不进去要好 */}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setPickerOpen(true)}
+              disabled={initialContent === null}
+            >
+              插入图形
+            </Button>
             <span className="text-neutral-400 dark:text-neutral-500">
               {charCount} 字
             </span>
@@ -250,6 +304,7 @@ export function NotePage() {
         ) : (
           <div className="mx-auto max-w-3xl px-8 py-6">
             <NoteEditor
+              ref={editorRef}
               noteId={noteId}
               initialMarkdown={initialContent}
               onChange={handleEditorChange}
@@ -257,6 +312,36 @@ export function NotePage() {
           </div>
         )}
       </div>
+
+      <DrawingPicker
+        open={pickerOpen}
+        drawings={drawings}
+        onClose={() => setPickerOpen(false)}
+        onCreate={() => {
+          setPickerOpen(false)
+          setEditingDrawing(null)
+          setBoardOpen(true)
+        }}
+        onEdit={(attachment) => {
+          setPickerOpen(false)
+          setEditingDrawing(attachment)
+          setBoardOpen(true)
+        }}
+      />
+
+      {boardOpen ? (
+        <Suspense fallback={null}>
+          <DrawBoard
+            noteId={noteId}
+            attachment={editingDrawing}
+            onClose={() => setBoardOpen(false)}
+            onInsert={(assetUrl, caption) =>
+              editorRef.current?.insertImage(assetUrl, caption) ?? false
+            }
+            onDirtyChange={setBoardDirty}
+          />
+        </Suspense>
+      ) : null}
     </div>
   )
 }

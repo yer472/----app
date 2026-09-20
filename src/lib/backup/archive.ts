@@ -138,7 +138,9 @@ export async function parseArchive(
     attachments.push({
       id: meta.id,
       noteId: meta.noteId,
-      type: 'image',
+      // 原样读回备份里记的类型。老备份一定带 'image'，
+      // 真的缺字段时才退回图片
+      type: meta.type ?? 'image',
       blob,
       mimeType: meta.mimeType,
       width: meta.width,

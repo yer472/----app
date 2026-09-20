@@ -98,11 +98,17 @@ await check('清单里该有的都有', () => {
     precacheUrls.some((u) => /^\/assets\/NotePage-.+\.js$/.test(u)),
     '没有预缓存 Milkdown 那个分片——离线时点开笔记会失败',
   )
+  // 画板是懒加载的独立分片，理由和 Milkdown 完全一样：
+  // 服务器关着的时候点「插入图形」，那个分片必须已经在缓存里
+  assert(
+    precacheUrls.some((u) => /^\/assets\/DrawBoard-.+\.js$/.test(u)),
+    '没有预缓存画板分片——离线时点开画板会失败',
+  )
   assert(
     precacheUrls.some((u) => /^\/assets\/KaTeX_.+\.woff2$/.test(u)),
     '没有预缓存 KaTeX 的 woff2 字体',
   )
-  return 'index.html / manifest / 四个图标 / Milkdown 分片 / woff2 字体'
+  return 'index.html / manifest / 四个图标 / Milkdown 分片 / 画板分片 / woff2 字体'
 })
 
 await check('字体过滤生效：零个 .woff 和 .ttf', () => {

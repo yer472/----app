@@ -1,10 +1,24 @@
 import { Crepe, CrepeFeature } from '@milkdown/crepe'
-import { useEffect, useRef } from 'react'
+import { editorViewCtx } from '@milkdown/kit/core'
+import { Fragment, Slice } from '@milkdown/kit/prose/model'
+import { useEffect, useImperativeHandle, useRef, type Ref } from 'react'
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
 import { resolveAssetUrl, toAssetUrl } from '@/lib/asset'
 import { processImage } from '@/lib/image'
 import { AttachmentRepository } from '@/repository'
+
+/** 编辑器暴露给外部的命令。目前只有插图片一件事 */
+export interface NoteEditorHandle {
+  /**
+   * 往光标处插入一张图片。
+   *
+   * 返回 false 表示编辑器还没准备好。调用方必须把这个失败显示出来——
+   * 静默失败在这里特别容易发生（header 比编辑器先渲染），
+   * 而用户看到的是「点了按钮没反应」。
+   */
+  insertImage: (assetUrl: string, caption: string) => boolean
+}
 
 interface NoteEditorProps {
   noteId: string
@@ -14,6 +28,7 @@ interface NoteEditorProps {
    */
   initialMarkdown: string
   onChange: (markdown: string) => void
+  ref?: Ref<NoteEditorHandle>
 }
 
 /**
@@ -27,6 +42,7 @@ export function NoteEditor({
   noteId,
   initialMarkdown,
   onChange,
+  ref,
 }: NoteEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -38,6 +54,56 @@ export function NoteEditor({
 
   // 同理，初始正文只在挂载时取一次
   const initialMarkdownRef = useRef(initialMarkdown)
+
+  // create() 是异步的，在那之前不能碰 editor。为 null 就说明还没就绪
+  const crepeRef = useRef<Crepe | null>(null)
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      insertImage: (assetUrl, caption) => {
+        const crepe = crepeRef.current
+        if (!crepe) return false
+
+        let inserted = false
+        crepe.editor.action((ctx) => {
+          const view = ctx.get(editorViewCtx)
+          const schema = view.state.schema
+          const imageType = schema.nodes['image-block']
+          if (!imageType) return
+
+          // 直接构造节点，**不要**拼一段 `![说明](url)` 再让解析器处理。
+          //
+          // image-block 的 Markdown 映射里，alt 槽位存的是**缩放比例**，
+          // 说明文字走 title 槽位：
+          //     parseMarkdown: ratio = Number(node.alt || 1), caption = node.title
+          //     toMarkdown:    alt = ratio.toFixed(2),      title = caption
+          // 所以手写 `![四杆机构](asset://x)` 会被解析成
+          // Number('四杆机构') = NaN → 退回 1，说明文字被静默丢掉。
+          // 正确写法是 `![1.00](asset://x "四杆机构")`，而构造节点天然就是对的。
+          const node = imageType.create({ src: assetUrl, caption, ratio: 1 })
+
+          const { from, to } = view.state.selection
+          // 图后面补一个空段落：image-block 是个 atom 块节点，
+          // 不留落点的话光标无处可去，用户会以为编辑器卡住了
+          const paragraph = schema.nodes.paragraph?.createAndFill()
+          const nodes = paragraph ? [node, paragraph] : [node]
+
+          // replaceRange 收的是 Slice 而不是 Fragment。
+          // maxOpen 让插入的块内容两端都能自然接合，不会把周围段落切碎
+          view.dispatch(
+            view.state.tr
+              .replaceRange(from, to, Slice.maxOpen(Fragment.fromArray(nodes)))
+              .scrollIntoView(),
+          )
+          inserted = true
+        })
+
+        return inserted
+      },
+    }),
+    [],
+  )
 
   useEffect(() => {
     const container = containerRef.current
@@ -89,11 +155,16 @@ export function NoteEditor({
     // 开发模式下这个 effect 会跑两遍：第一遍的实例要等 create() 完成后再销毁，
     // 否则会和第二遍的实例抢同一个 DOM。
     ready.then(() => {
-      if (cancelled) void crepe.destroy()
+      if (cancelled) {
+        void crepe.destroy()
+        return
+      }
+      crepeRef.current = crepe
     })
 
     return () => {
       cancelled = true
+      crepeRef.current = null
       void ready
         .then(() => crepe.destroy())
         .finally(() => holder.remove())

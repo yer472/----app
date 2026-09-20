@@ -56,6 +56,38 @@ export async function resolveAssetUrl(url: string): Promise<string> {
 }
 
 /**
+ * 覆盖某个附件之后，让正文里那张图立刻显示新内容。
+ *
+ * 光清掉缓存是不够的，这点很容易漏：resolveAssetUrl 按附件 id 缓存 blob URL，
+ * 而编辑器里的 `<img>` **已经拿着旧地址了**——清缓存不会让它回头重新解析。
+ * 结果就是数据库里明明是新的，屏幕上还是旧的，而且刷新也不一定好
+ * （取决于旧 blob URL 有没有被释放）。
+ *
+ * 所以这里除了清缓存，还要把页面上仍指向旧地址的 `<img>` 直接换掉。
+ * 比想办法让 ProseMirror 重渲染那个节点可靠得多——从外部没有稳定的
+ * 办法只重渲染一个 image 节点。
+ */
+export async function refreshAssetImages(attachmentId: string): Promise<void> {
+  const staleUrl = blobUrlCache.get(attachmentId)
+
+  // 顺序要紧：必须先清缓存再重新解析，否则拿回来的还是旧地址。
+  // 但旧地址不能马上释放——它可能正被屏幕上的图用着，释放了会变成死链。
+  blobUrlCache.delete(attachmentId)
+  inflight.delete(attachmentId)
+
+  const freshUrl = await resolveAssetUrl(toAssetUrl(attachmentId))
+  if (!freshUrl) return
+
+  if (staleUrl && staleUrl !== freshUrl) {
+    for (const img of document.querySelectorAll('img')) {
+      // img.src 返回的是解析后的绝对地址，blob: 本身就是绝对的，可以直接比
+      if (img.src === staleUrl) img.src = freshUrl
+    }
+    URL.revokeObjectURL(staleUrl)
+  }
+}
+
+/**
  * 释放所有 blob URL。
  *
  * 在笔记页卸载、编辑器已经销毁之后调用。
