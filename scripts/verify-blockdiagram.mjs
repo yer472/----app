@@ -645,8 +645,19 @@ try {
     assert(hasEditor, '放下模块之后没有出现文字输入框')
     const canvas = await readCanvas()
     assert(canvas.rects === 5, `画布上应当有 5 个方框，实际 ${canvas.rects}`)
-    assert(canvas.texts.includes('新模块'), `没有占位文字：${canvas.texts.join('/')}`)
-    return '模块已落地，输入框已打开'
+    /*
+     * 编辑期间画布上**不该**再有这个模块的标签。
+     *
+     * 输入框是浮在画布上的一层，画布如果照旧画着场景里那句旧文字，两份就叠在
+     * 一起了——清空输入框时旧字还在，看着像没删掉。这条断言就是钉住那个现象：
+     * 旧标签必须真的从画布里消失，而不是靠输入框盖住。下面「打字 + Enter」
+     * 那一条再验它**回来**（提交之后画布上重新画出「油箱」）。
+     */
+    assert(
+      !canvas.texts.includes('新模块'),
+      `编辑期间画布上又画了一遍旧标签，会和输入框叠在一起：${canvas.texts.join('/')}`,
+    )
+    return '模块已落地，输入框已打开，旧标签已让位'
   })
 
   await check('★ 打字 + Enter：文字进场景，而且是**一步**历史', async () => {
@@ -705,6 +716,13 @@ try {
     assert(
       await evaluate(`Boolean(document.querySelector('[data-board-label-editor] input'))`),
       '双击之后没有进入文字编辑',
+    )
+    // 双击进来的编辑同样要让画布上那份旧标签让位。和「新建模块」那条路径
+    // 不是同一段代码（这条走双击 → hitTest → beginEdit），所以两边都钉一遍
+    const during = await readCanvas()
+    assert(
+      !during.texts.includes('动力元件'),
+      `编辑期间画布上还画着旧标签：${during.texts.join('/')}`,
     )
     await call('Input.insertText', { text: '改坏' })
     await pressKey('Escape', 'Escape', 27)

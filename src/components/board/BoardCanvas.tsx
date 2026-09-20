@@ -932,7 +932,13 @@ export function BoardCanvas({
         strokeLinejoin="round"
       >
         {scene.shapes.map((shape) => (
-          <ShapeView key={shape.id} shape={shape} ctx={ctx} />
+          <ShapeView
+            key={shape.id}
+            shape={shape}
+            ctx={ctx}
+            // 正在改文字的那个模块：画布上不再留一份旧标签，屏幕上只剩输入框里那份
+            hideLabel={editing?.id === shape.id}
+          />
         ))}
         {draft ? <ShapeView shape={draft} ctx={ctx} /> : null}
       </g>
@@ -1159,6 +1165,11 @@ function HandlesView({ shape, defs }: { shape: Shape; defs: SceneDefs }) {
  * 它放在**界面层**（主 `<g>` 之外），所以不会进导出的 SVG。导出的图里文字是
  * `<text>`（走 `shapeToParts`），字号和字体都取自同一组常量，所以屏幕上看到的
  * 就是导出的样子。
+ *
+ * ⚠️ 它一出现，画布上**属于同一个模块的那份 `<text>` 就必须停画**（调用点给
+ * `ShapeView` 传 `hideLabel`）。输入框背景是透明的，画布照旧画的话两份文字会
+ * 叠在一起——清空输入框时旧字还在，看着像没删掉。两份文字的字号字体相同、
+ * 都在模块里居中，所以这个错误第一眼看上去只是「有点糊」，很容易漏。
  */
 function LabelEditor({
   node,
@@ -1266,13 +1277,27 @@ function ShapeView({
   shape,
   ctx,
   style,
+  hideLabel = false,
 }: {
   shape: Shape
   ctx: SceneContext
   style?: PartStyle
+  /**
+   * 丢掉这个图形的文字零件。只有一种用法：**正在被就地编辑的那个模块**。
+   *
+   * 输入框是浮在画布上面的一层，画布本身仍然在画场景里那句旧标签，而输入框
+   * 的背景是透明的——于是两份文字叠在一起：清空输入框时旧字还在，看着像没
+   * 删掉；改短了就是旧字从新字两边露出来。
+   *
+   * 这里是**真的不画**，而不是像高亮层那样把标签涂成透明（`labelFill`）：
+   * 屏幕上就只应该存在一份这句话，DOM 里也一样，自检才能直接断言
+   * 「编辑期间画布上没有这个标签」。
+   */
+  hideLabel?: boolean
 }) {
   const { transform, parts } = shapeToParts(shape, ctx)
-  const children = parts.map((part, index) => (
+  const visible = hideLabel ? parts.filter((part) => part.kind !== 'text') : parts
+  const children = visible.map((part, index) => (
     <Fragment key={index}>{partToReact(part, style)}</Fragment>
   ))
 
